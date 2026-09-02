@@ -47,6 +47,11 @@ resource-level scope. The user approved this one-policy update and it was applie
 Worker policies are unchanged. See the AWS sample and permission reference
 in Sources. The CLI still explicitly uses `NO_INGRESS`.
 
+A later build denial identified `lambda:TagResource` on `*` during image
+creation. A second saved bootstrap plan adds only that initial-tag grant, limited
+to `us-east-1` and the exact Project/ManagedBy tags. It can tag other Lambda
+resources with those values; worker access is unchanged. Approval is pending.
+
 Design review checkpoint: Q1-Q42 are answered. V1 design choices are settled;
 technical checks remain. Implementation is now approved; deployment review remains.
 Q19 requires explicit image-version selection. Q20 now defers supervisor/agent

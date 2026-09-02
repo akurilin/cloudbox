@@ -176,6 +176,21 @@ locals {
         Condition = { StringEquals = { "aws:RequestTag/Project" = local.config.project_name, "aws:RequestedRegion" = local.config.aws_region } }
       },
       {
+        # CreateMicrovmImage authorizes initial tags against *, before the ARN exists.
+        Sid      = "InitialProjectImageTags"
+        Effect   = "Allow"
+        Action   = ["lambda:TagResource"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:RequestedRegion"      = local.config.aws_region
+            "aws:RequestTag/Project"   = local.config.project_name
+            "aws:RequestTag/ManagedBy" = "CloudboxImageScript"
+          }
+          "ForAllValues:StringEquals" = { "aws:TagKeys" = ["Project", "ManagedBy"] }
+        }
+      },
+      {
         Sid      = "ProjectImageAndRuns"
         Effect   = "Allow"
         Action   = ["lambda:GetMicrovmImage", "lambda:UpdateMicrovmImage", "lambda:DeleteMicrovmImage", "lambda:DeleteMicrovmImageVersion", "lambda:UpdateMicrovmImageVersion", "lambda:GetMicrovmImageVersion", "lambda:GetMicrovmImageBuild", "lambda:ListMicrovmImageVersions", "lambda:ListMicrovmImageBuilds", "lambda:ListTags", "lambda:TagResource", "lambda:UntagResource", "lambda:RunMicrovm", "lambda:GetMicrovm", "lambda:TerminateMicrovm"]

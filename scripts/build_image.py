@@ -139,7 +139,11 @@ def main():
         emit(result)
         return 0 if result["ok"] else 1
     except (CloudboxError, BotoCoreError, ClientError, OSError, ValueError, KeyError) as error:
-        emit(error_record(error))
+        record = error_record(error)
+        # Image requests contain no runtime secrets; keep AWS build denials actionable.
+        if isinstance(error, ClientError) and error.operation_name in {"CreateMicrovmImage", "UpdateMicrovmImage"}:
+            record["error"]["message"] = error.response.get("Error", {}).get("Message")
+        emit(record)
         return 1
     except KeyboardInterrupt:
         emit({"ok": False, "error": {"code": "interrupted", "message": "The AWS build can still be running."}})
