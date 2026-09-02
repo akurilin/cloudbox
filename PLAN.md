@@ -2,9 +2,11 @@
 
 Status: cloud-only spike implementation in progress. Last reviewed: 2026-09-02.
 
-The user approved implementation and Git initialization. No AWS resources have
-been created yet. Review the Terraform changes before deployment. AWS login
-alone does not authorize deployment.
+The user approved implementation, Git initialization, and incremental commits.
+The approved bootstrap created six IAM items: the provisioner role, its policy
+and attachment, and three worker boundaries. Main infrastructure is not yet
+deployed. Review its Terraform plan before apply. AWS login alone does not
+authorize deployment.
 
 ## Current spike scope
 
@@ -25,9 +27,15 @@ This section overrides the earlier v1 sequence and test requirements below.
 - The manager coordinates infrastructure, worker, and CLI agents, then reviews
   their integration. No agent may deploy without the reviewed cloud changes.
 
-Git was initialized on `main`. AWS SSO is expired; the user has been asked to
-renew it. OpenRouter key availability is not yet confirmed. Never put either
-credential in source, chat, saved job records, or Terraform state.
+Git is initialized on `main`. AWS SSO identity was verified for account
+`618170664907`. The user supplied the OpenRouter key in the ignored `.env` file.
+Never put either credential in source, chat, saved job records, or Terraform state.
+The user confirmed Pi and `z-ai/glm-5.3` through OpenRouter; no Claude Code or
+Anthropic inference integration is part of this spike.
+
+Implementation files now cover Terraform, the Pi worker, the CLI, image builds,
+secret setup, and one cloud smoke test. Terraform validation, Python compilation,
+and shell syntax checks passed. The real cloud test has not run yet.
 
 Design review checkpoint: Q1-Q42 are answered. V1 design choices are settled;
 technical checks remain. Implementation is now approved; deployment review remains.
