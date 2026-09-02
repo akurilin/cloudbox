@@ -21,6 +21,7 @@ from cloudbox.common import (
 from cloudbox.environments import get_environment
 from cloudbox.resources import check_resources, state_remains
 from scripts import setup, smoke_cloud, teardown
+from scripts.set_github_secret import private_key_from_file
 
 TEST_ENVIRONMENT = "test"
 PROD_ENVIRONMENT = "prod"
@@ -60,6 +61,22 @@ def test_configuration(environment, expected=None):
             "test_account_shared", "Test must use a different account from prod."
         )
     return config
+
+
+def setup_arguments(arguments, config):
+    # Check the replacement key before teardown can remove the stored copy.
+    github_enabled = "github_app_id" in config
+    if github_enabled and not arguments.github_key_file:
+        raise CloudboxError("github_key_required", "Supply --github-key-file before rebuilding GitHub-enabled test resources.")
+    if arguments.github_key_file and not github_enabled:
+        raise CloudboxError("github_not_configured", "Configure GitHub before supplying --github-key-file.")
+    values = ["--env", TEST_ENVIRONMENT, "--yes"]
+    if arguments.env_file:
+        values.extend(("--env-file", str(arguments.env_file)))
+    if arguments.github_key_file:
+        private_key_from_file(arguments.github_key_file)
+        values.extend(("--github-key-file", str(arguments.github_key_file)))
+    return values
 
 
 class Report:
@@ -175,6 +192,11 @@ def main(argv=None):
     parser.add_argument(
         "--env-file", type=Path, help="OpenRouter key file; defaults to .env.test."
     )
+    parser.add_argument(
+        "--github-key-file",
+        type=Path,
+        help="GitHub App PEM file; required when GitHub is configured.",
+    )
     # Accept old commands; test resources no longer need interactive approval.
     parser.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
@@ -184,6 +206,7 @@ def main(argv=None):
     stage = "preflight"
     try:
         config = test_configuration(environment)
+        setup_inputs = setup_arguments(arguments, config)
         report = Report(environment)
         report.data.update(
             {
@@ -198,7 +221,7 @@ def main(argv=None):
         report.save()
         print(
             f"Test account: {config['aws_account_id']} ({config['aws_region']})\n"
-            "Remove existing Cloudbox test resources; rebuild; run one math job; remove test resources and the secret.\n"
+            "Remove existing Cloudbox test resources; rebuild; run one math job; remove test resources and secrets.\n"
             "AWS and OpenRouter charges apply. Do not use this test account during the test.",
             file=sys.stderr,
         )
@@ -211,11 +234,8 @@ def main(argv=None):
         test_configuration(environment, config)
         check_resources(environment, require_clean=True)
         report.event(stage, {"status": "passed"})
-        setup_arguments = ["--env", environment.name, "--yes"]
-        if arguments.env_file:
-            setup_arguments.extend(("--env-file", str(arguments.env_file)))
         stage, setup_started = "setup", True
-        run_stage(report, stage, setup.main, setup_arguments)
+        run_stage(report, stage, setup.main, setup_inputs)
         stage = "math"
         test_configuration(environment, config)
         report.data["math"] = run_stage(

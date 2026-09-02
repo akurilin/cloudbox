@@ -105,6 +105,14 @@ resource "aws_secretsmanager_secret" "openrouter" {
   recovery_window_in_days = module.policy.secret_recovery_days
 }
 
+# Keep App credentials separate from keys that workers can read.
+resource "aws_secretsmanager_secret" "github" {
+  count                   = module.policy.github_enabled ? 1 : 0
+  name                    = local.names.github_secret_name
+  description             = "GitHub App private key for the trusted Cloudbox submitter."
+  recovery_window_in_days = module.policy.secret_recovery_days
+}
+
 resource "aws_iam_role" "worker" {
   for_each             = module.policy.role_policies
   name                 = local.names.role_names[each.key]
@@ -123,24 +131,25 @@ resource "aws_iam_role_policy" "worker" {
 # Read only this non-secret output in the CLI; do not export the whole state.
 output "cloudbox" {
   value = merge(local.config, {
-    schema_version        = 1
-    bucket_name           = aws_s3_bucket.data.bucket
-    image_name            = local.names.image_name
-    image_arn             = local.names.image_arn
-    base_image_arn        = local.names.base_image_arn
-    architecture          = "ARM_64"
-    ingress_connector_arn = local.names.ingress_connector_arn
-    image_source_prefix   = "images/"
-    build_role_arn        = aws_iam_role.worker["build"].arn
-    runtime_role_arn      = aws_iam_role.worker["runtime"].arn
-    run_data_role_arn     = aws_iam_role.worker["run_data"].arn
-    provisioner_role_arn  = local.names.provisioner_role_arn
-    openrouter_secret_arn = aws_secretsmanager_secret.openrouter.arn
-    log_group_name        = aws_cloudwatch_log_group.worker.name
-    max_timeout_seconds   = module.policy.max_timeout_seconds
-    sts_session_seconds   = module.policy.sts_session_seconds
-    cleanup_seconds       = module.policy.cleanup_seconds
-    max_result_bytes      = module.policy.max_result_bytes
-    max_prompt_characters = module.policy.max_prompt_characters
+    schema_version                = 1
+    bucket_name                   = aws_s3_bucket.data.bucket
+    image_name                    = local.names.image_name
+    image_arn                     = local.names.image_arn
+    base_image_arn                = local.names.base_image_arn
+    architecture                  = "ARM_64"
+    ingress_connector_arn         = local.names.ingress_connector_arn
+    image_source_prefix           = "images/"
+    build_role_arn                = aws_iam_role.worker["build"].arn
+    runtime_role_arn              = aws_iam_role.worker["runtime"].arn
+    run_data_role_arn             = aws_iam_role.worker["run_data"].arn
+    provisioner_role_arn          = local.names.provisioner_role_arn
+    openrouter_secret_arn         = aws_secretsmanager_secret.openrouter.arn
+    github_private_key_secret_arn = module.policy.github_enabled ? aws_secretsmanager_secret.github[0].arn : null
+    log_group_name                = aws_cloudwatch_log_group.worker.name
+    max_timeout_seconds           = module.policy.max_timeout_seconds
+    sts_session_seconds           = module.policy.sts_session_seconds
+    cleanup_seconds               = module.policy.cleanup_seconds
+    max_result_bytes              = module.policy.max_result_bytes
+    max_prompt_characters         = module.policy.max_prompt_characters
   })
 }

@@ -8,11 +8,12 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 from .common import (
     CREDENTIAL_MARGIN_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
+    GITHUB_SCHEMA_VERSION,
     MAX_PROMPT_CHARACTERS,
     MAX_RECORD_BYTES,
     MICROVM_SERVICE,
@@ -33,6 +34,7 @@ from .common import (
     validate_spec,
 )
 from .environments import add_environment_argument, get_environment
+from .github import prepare_github_access, revoke_quietly, token_deadline
 
 LIST_PAGE_SIZE = 20
 MAX_LIST_PAGE_SIZE = 100
@@ -43,6 +45,10 @@ MAX_HOOK_PAYLOAD_BYTES = 4096
 AWS_TERMINATED = "TERMINATED"
 UNKNOWN = "unknown"
 DOWNLOAD_NAMES = ("spec.json", "launch.json", "result.json", "output/result.json")
+REJECTED_LAUNCH_CODES = {
+    "AccessDeniedException", "UnauthorizedException", "ValidationException",
+    "ResourceNotFoundException", "ServiceQuotaExceededException", "TooManyRequestsException",
+}
 
 
 class Parser(argparse.ArgumentParser):
@@ -174,84 +180,125 @@ class Runs:
                 "The selected image version is not ready and active.",
             )
         identity = str(uuid.uuid4())
-        credentials = scoped_data_credentials(self.session, deployment, identity)
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "run_id": identity,
-            "bucket_name": self.bucket,
-            "data_credentials": {
-                key: credentials[key]
-                for key in ("AccessKeyId", "SecretAccessKey", "SessionToken")
-            },
-            "openrouter_secret_arn": deployment["openrouter_secret_arn"],
-            "log_group_name": deployment["log_group_name"],
-            "aws_region": deployment["aws_region"],
-        }
-        payload_text = json.dumps(payload, separators=(",", ":"))
-        if len(payload_text.encode("utf-8")) > MAX_HOOK_PAYLOAD_BYTES:
-            raise CloudboxError(
-                "payload_too_large", "Run credentials exceed the AWS payload limit."
-            )
-        spec.update(
-            {
-                "run_id": identity,
-                "submitted_at": timestamp(),
-                "provider": "openrouter",
-                "image_arn": deployment["image_arn"],
-                "image_version": image_version,
-                "required_output": "output/result.json",
-                "resources": {
-                    "memory_mib": deployment["memory_mib"],
-                    "architecture": deployment["architecture"],
-                },
-            }
-        )
-        put_record(
-            self.s3,
-            self.bucket,
-            run_prefix(identity) + "spec.json",
-            spec,
-            exclusive=True,
-        )
-        seconds_left = (credentials["Expiration"] - datetime.now(UTC)).total_seconds()
-        if seconds_left < spec["timeout_seconds"] + CREDENTIAL_MARGIN_SECONDS:
-            raise CloudboxError(
-                "credentials_expire_early",
-                "Run credentials expire before the deadline.",
-                run_id=identity,
-            )
+        access = None
+        preserve_token = False
         try:
-            # SDK retries reuse this UUID and this exact payload; a new submit gets a new UUID.
-            response = self.compute.run_microvm(
-                imageIdentifier=deployment["image_arn"],
-                imageVersion=image_version,
-                executionRoleArn=deployment["runtime_role_arn"],
-                ingressNetworkConnectors=[deployment["ingress_connector_arn"]],
-                idlePolicy={
-                    "autoResumeEnabled": False,
-                    "maxIdleDurationSeconds": IDLE_SUSPEND_SECONDS,
-                    "suspendedDurationSeconds": 0,
+            credentials = scoped_data_credentials(self.session, deployment, identity)
+            payload = {
+                "schema_version": spec["schema_version"],
+                "run_id": identity,
+                "bucket_name": self.bucket,
+                "data_credentials": {
+                    key: credentials[key]
+                    for key in ("AccessKeyId", "SecretAccessKey", "SessionToken")
                 },
-                logging={
-                    "cloudWatch": {
-                        "logGroup": deployment["log_group_name"],
-                        "logStream": identity,
+                "openrouter_secret_arn": deployment["openrouter_secret_arn"],
+                "log_group_name": deployment["log_group_name"],
+                "aws_region": deployment["aws_region"],
+            }
+            access = prepare_github_access(self.session, deployment)
+            if access:
+                spec.update(
+                    {"schema_version": GITHUB_SCHEMA_VERSION, "github": access.github}
+                )
+                payload.update(
+                    {
+                        "schema_version": GITHUB_SCHEMA_VERSION,
+                        "github_token": access.token,
+                        "github_token_expires_at": access.expires_at,
                     }
-                },
-                maximumDurationInSeconds=spec["timeout_seconds"],
-                runHookPayload=payload_text,
-                clientToken=identity,
+                )
+            payload_text = json.dumps(payload, separators=(",", ":"))
+            if len(payload_text.encode("utf-8")) > MAX_HOOK_PAYLOAD_BYTES:
+                raise CloudboxError(
+                    "payload_too_large", "Run credentials exceed the AWS payload limit."
+                )
+            spec.update(
+                {
+                    "run_id": identity,
+                    "submitted_at": timestamp(),
+                    "provider": "openrouter",
+                    "image_arn": deployment["image_arn"],
+                    "image_version": image_version,
+                    "required_output": "output/result.json",
+                    "resources": {
+                        "memory_mib": deployment["memory_mib"],
+                        "architecture": deployment["architecture"],
+                    },
+                }
             )
-        except (BotoCoreError, ClientError) as error:
-            raise CloudboxError(
-                "launch_unknown",
-                "AWS launch response is unavailable. Inspect this run before resubmitting.",
-                run_id=identity,
-                task_status=UNKNOWN,
-                compute_state=UNKNOWN,
-            ) from error
+            seconds_left = (
+                credentials["Expiration"] - datetime.now(UTC)
+            ).total_seconds()
+            if seconds_left < spec["timeout_seconds"] + CREDENTIAL_MARGIN_SECONDS:
+                raise CloudboxError(
+                    "credentials_expire_early",
+                    "Run credentials expire before the deadline.",
+                    run_id=identity,
+                )
+            if access:
+                token_deadline(access.expires_at, spec["timeout_seconds"])
+            put_record(
+                self.s3,
+                self.bucket,
+                run_prefix(identity) + "spec.json",
+                spec,
+                exclusive=True,
+            )
+            try:
+                # SDK retries reuse this UUID and this exact payload; a new submit
+                # gets a new UUID. Keep credentials after uncertain launch so a
+                # running VM can finish.
+                preserve_token = True
+                response = self.compute.run_microvm(
+                    imageIdentifier=deployment["image_arn"],
+                    imageVersion=image_version,
+                    executionRoleArn=deployment["runtime_role_arn"],
+                    ingressNetworkConnectors=[deployment["ingress_connector_arn"]],
+                    idlePolicy={
+                        "autoResumeEnabled": False,
+                        "maxIdleDurationSeconds": IDLE_SUSPEND_SECONDS,
+                        "suspendedDurationSeconds": 0,
+                    },
+                    logging={
+                        "cloudWatch": {
+                            "logGroup": deployment["log_group_name"],
+                            "logStream": identity,
+                        }
+                    },
+                    maximumDurationInSeconds=spec["timeout_seconds"],
+                    runHookPayload=payload_text,
+                    clientToken=identity,
+                )
+            except (BotoCoreError, ClientError) as error:
+                rejected = isinstance(error, ParamValidationError) or (
+                    isinstance(error, ClientError)
+                    and error.response.get("ResponseMetadata", {}).get(
+                        "RetryAttempts"
+                    )
+                    == 0
+                    and error.response.get("Error", {}).get("Code")
+                    in REJECTED_LAUNCH_CODES
+                )
+                if rejected:
+                    preserve_token = False
+                    raise CloudboxError(
+                        "launch_rejected",
+                        "AWS rejected the run before launch.",
+                        run_id=identity,
+                    ) from None
+                raise CloudboxError(
+                    "launch_unknown",
+                    "AWS launch response is unavailable. Inspect this run before resubmitting.",
+                    run_id=identity,
+                    task_status=UNKNOWN,
+                    compute_state=UNKNOWN,
+                ) from None
+        finally:
+            if access and not preserve_token:
+                revoke_quietly(access.token)
         launch = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": spec["schema_version"],
             "run_id": identity,
             "microvm_id": response["microvmId"],
             "image_arn": deployment["image_arn"],

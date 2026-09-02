@@ -56,6 +56,56 @@ Setup reports `ready: true`. It does not submit jobs or call a model. AWS charge
 apply. Setup refuses resource deletion, replacement, and untracked resource
 conflicts. After a failed stage, correct the error and run setup again.
 
+## GitHub tools
+
+GitHub is optional. When configured, each run receives Git, `gh`, and temporary
+access to the configured repositories. The agent reads the prompt and chooses
+its actions. Cloudbox does not parse issue URLs or control GitHub workflows.
+Python, Node, and `uv` are also available in the worker image.
+
+Create a GitHub App with Contents, Issues, and Pull requests read/write, and
+Metadata read. Install it on selected repositories. Add these fields to the
+`deployment` object in the selected environment's ignored input file:
+
+```json
+{
+  "github_app_id": 123456,
+  "github_installation_id": 234567,
+  "github_repository_ids": [345678]
+}
+```
+
+Use the App ID, installation ID, and numeric repository IDs from GitHub.
+Keep the downloaded App private key outside the repository. For first setup:
+
+```sh
+uv run python scripts/setup.py --env test --github-key-file /absolute/path/to/key.pem
+```
+
+Setup creates a separate secret and loads the key outside Terraform state.
+Later setup runs can reuse its stored value. To replace the stored key:
+
+```sh
+uv run python scripts/set_github_secret.py --env test --key-file /absolute/path/to/key.pem
+```
+
+The trusted CLI reads that key and creates a repository-restricted token for
+each run. The worker receives only the temporary token. Git uses `gh` as its
+credential helper. The agent receives tool and access information, with no
+token in its prompt. If required access or tools are unavailable through
+authorized means, it must return a blocked result with the missing requirement.
+
+Use normal prompts for GitHub tasks. For example, replace the URL below:
+
+```sh
+uv run cloudbox --env test submit --timeout 20m \
+  'Address https://github.com/OWNER/REPO/issues/NUMBER. Run relevant checks, open a draft PR, and post its link on the issue. Save the results as JSON.'
+```
+
+Cloudbox checks agent completion and the JSON result, not whether a PR fixes an
+issue. Review external changes independently. No automatic task retry is safe
+after a lost response: a GitHub action may already have completed.
+
 ## Full cloud test
 
 ```sh
@@ -68,6 +118,10 @@ The test runs without approval prompts. The test deployment is disposable:
 reset test -> check clean -> setup -> math job -> validate -> teardown -> check clean
 ```
 
+If GitHub is configured, also pass `--github-key-file /absolute/path/to/key.pem`.
+The test checks this file before reset and reloads it during setup. It still
+runs the math prompt; it does not create GitHub content.
+
 The test clears an existing Cloudbox test deployment before setup. It refuses
 unknown deletion targets, invalid production inputs, and a production account
 that matches the test account. Production inputs can be absent only when
@@ -76,7 +130,7 @@ production state is empty. It checks
 run status, logs, listing, and VM termination. It tries teardown even if setup or
 the job fails. Cleanup failure fails the test. AWS and OpenRouter charges apply.
 
-Reset and cleanup permanently delete the test secret, results, logs, and image.
+Reset and cleanup permanently delete the test secrets, results, logs, and image.
 Local reports and downloaded results stay under `.cloudbox/`. Do not run other setup,
 teardown, or job commands against `test` during this test. If cleanup fails or the
 process is killed, run teardown again with the same configuration and state.
@@ -89,6 +143,9 @@ uv run python scripts/smoke_cloud.py --env test
 
 The worker's `output/result.json` is the answer. The run's top-level `result.json`
 is the supervisor's status record. They are separate files.
+The agent must also end with only `{"status":"completed"}`, or
+`{"status":"blocked","reason":"..."}`. Extra prose fails this completion check.
+The system prompt supplies this contract; task prompts need not repeat it.
 
 ## Check or delete resources
 
@@ -101,9 +158,10 @@ uv run python scripts/teardown.py --env test --force-delete-secret
 
 Teardown asks for approval; `--yes` skips the prompt. It stops VMs, deletes the
 image and bucket contents, then destroys main infrastructure and IAM bootstrap.
-It verifies absence. Local keys, inputs, state files, and downloads stay.
+It waits for active image builds before deletion and verifies absence. Local
+keys, inputs, state files, and downloads stay.
 
-Without `--force-delete-secret`, the secret keeps seven-day recovery and the
+Without `--force-delete-secret`, secrets keep seven-day recovery and the
 checker does not report a clean deployment. Keep state until deletion completes.
 
 Terraform deletes tracked resources, not all resources in an account. The shared
@@ -134,12 +192,27 @@ Submission accepts stdin (`submit -`) or `--spec job.json`, with `--model` and
 `timeout_seconds`. Only the prompt is required. No automatic model substitution.
 Downloads refuse to overwrite files. Saved partial output remains available.
 
+CloudWatch traces include visible assistant messages, tool arguments, tool output,
+errors, timing, and usage. Private reasoning and binary content are excluded.
+Known runtime credentials and common secret formats are redacted before logging.
+Text values are limited to 8 KiB and records to 16 KiB; truncation is marked.
+Use commands and their results to assess behavior; verify task outcomes separately.
+Logs can contain repository content, and redaction cannot detect every arbitrary
+secret.
+
+Terraform sets CloudWatch retention to 30 days. Use `cloudbox logs RUN_ID` to read
+the trace, or `cloudbox logs RUN_ID --follow` while the agent runs.
+
 ## Limits
 
 - Pi and its supervisor share a VM without an internal security boundary.
 - Outbound access is open; inbound access is disabled.
 - A compromised worker can disclose credentials it can read or stop sibling VMs
   that use the same image. Workers cannot access other runs' S3 files.
+- GitHub tokens permit writes across configured repositories, including merges
+  where branch rules allow them. They are readable inside the VM. The App private
+  key is not available to the worker. Normal cleanup revokes each temporary token;
+  forced termination can leave it valid until its one-hour expiry.
 - Default deadline: 600 seconds, including 30 seconds for cleanup; maximum 3,300.
 - Prompt limit: 128,000 characters. Result limit: 1 MiB.
 - Run data and logs expire after 30 days; deletion is not immediate at that age.
@@ -147,5 +220,8 @@ Downloads refuse to overwrite files. Saved partial output remains available.
 - No uploads, resume, local worker simulation, or per-run environment changes.
 
 The prior cloud math test passed on 2026-09-02 against the original
-single-account deployment. The new multi-account lifecycle test has not yet
+single-account deployment. A later GitHub-tools run on the same deployment
+also passed: authenticated checkout, a real draft PR, and an issue comment;
+CloudWatch captured commands and results, teardown removed the test resources,
+and the final check was clean. The new multi-account lifecycle test has not yet
 been run against AWS.

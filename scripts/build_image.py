@@ -11,8 +11,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from botocore.exceptions import BotoCoreError, ClientError
-
+from botocore.config import Config
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 from cloudbox.common import (
     MICROVM_SERVICE,
     ROOT,
@@ -30,10 +37,12 @@ SOURCE_NAMES = (
     "Dockerfile",
     "listener.py",
     "supervisor.py",
+    "github_access.py",
     "requirements.txt",
     "startup.sh",
     "teardown.sh",
 )
+SHARED_SOURCE_NAMES = ("github_api.py",)
 HOOK_PORT = 8080
 RUN_HOOK_TIMEOUT_SECONDS = 30
 READY_HOOK_TIMEOUT_SECONDS = 120
@@ -44,6 +53,11 @@ ZIP_CONTENT_TYPE = "application/zip"
 IMAGE_OWNER = "CloudboxImageScript"
 VERSION_COMPLETE = {"SUCCESSFUL", "FAILED", "DELETED", "DELETE_FAILED"}
 VERSION_PENDING = {"PENDING", "IN_PROGRESS"}
+IMAGE_BUILD_PENDING = {"CREATING", "UPDATING"}
+IMAGE_DELETABLE = {"CREATED", "CREATE_FAILED", "UPDATED", "UPDATE_FAILED", "DELETE_FAILED"}
+VERSION_DELETE_PENDING = VERSION_PENDING | {"DELETING"}
+TRANSIENT_IMAGE_READ_ERRORS = (ConnectionClosedError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError)
+DELETE_SDK_CONFIG = SDK_CONFIG.merge(Config(retries={"mode": "standard", "total_max_attempts": 1}))
 IMAGE_MISSING = "ResourceNotFoundException"
 BUILD_SETTING_FIELDS = (
     "baseImageArn",
@@ -57,11 +71,12 @@ BUILD_SETTING_FIELDS = (
 
 
 def source_archive():
-    # Package only worker sources; root secrets and Terraform files cannot enter the image.
+    # Package named runtime sources; secrets and Terraform files cannot enter the image.
     content = io.BytesIO()
     with zipfile.ZipFile(content, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for name in SOURCE_NAMES:
-            path = ROOT / "worker" / name
+        sources = [(name, ROOT / "worker" / name) for name in SOURCE_NAMES]
+        sources.extend((name, ROOT / "cloudbox" / name) for name in SHARED_SOURCE_NAMES)
+        for name, path in sources:
             if path.is_symlink() or not path.is_file():
                 raise CloudboxError(
                     "source_invalid", "A required worker file is missing or is a link."
@@ -257,25 +272,69 @@ def ensure_image(deployment, session=None, *, wait=True):
     return ready_version(client, image_arn, response["imageVersion"], wait=wait)
 
 
+def delete_image_once(session, image_arn):
+    # Delete has no idempotency token; an unknown response must not repeat it.
+    session.client(MICROVM_SERVICE, config=DELETE_SDK_CONFIG).delete_microvm_image(imageIdentifier=image_arn)
+
+
+def wait_until_deletable(client, image_arn, *, wait):
+    # The parent can be ready while an inactive version still builds.
+    deadline = time.monotonic() + BUILD_WAIT_SECONDS
+    while True:
+        unavailable = False
+        try:
+            image = owned_image(client, image_arn)
+            if image is None or image.get("state") == "DELETING":
+                return image
+            busy = image.get("state") in IMAGE_BUILD_PENDING
+            if not busy:
+                if image.get("state") not in IMAGE_DELETABLE:
+                    raise CloudboxError("image_state_unknown", "Inspect the image state before deletion.", image_arn=image_arn)
+                request = {"imageIdentifier": image_arn}
+                while True:
+                    page = client.list_microvm_image_versions(**request)
+                    busy = any(item.get("state") in VERSION_DELETE_PENDING for item in page.get("items", []))
+                    if busy or not page.get("nextToken"):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise CloudboxError("image_check_unavailable", "The image check timed out; inspect it before retrying.", image_arn=image_arn)
+                    request["nextToken"] = page["nextToken"]
+                if not busy:
+                    return image
+        except TRANSIENT_IMAGE_READ_ERRORS:
+            # Retry read failures only; a failed read does not prove build completion.
+            unavailable = True
+        remaining = deadline - time.monotonic()
+        if not wait or remaining <= 0:
+            code = "image_check_unavailable" if unavailable else "image_busy"
+            raise CloudboxError(code, "The image is not ready for deletion; inspect it before retrying.", image_arn=image_arn)
+        time.sleep(min(POLL_SECONDS, remaining))
+
+
 def wait_for_deletion(client, image_arn):
     deadline = time.monotonic() + BUILD_WAIT_SECONDS
     while True:
-        image = owned_image(client, image_arn)
-        if image is None or image.get("state") == "DELETED":
-            return
-        if image.get("state") == "DELETE_FAILED":
-            raise CloudboxError(
-                "image_delete_failed",
-                "AWS could not delete the image.",
-                image_arn=image_arn,
-            )
-        if time.monotonic() >= deadline:
+        try:
+            image = owned_image(client, image_arn)
+            if image is None:
+                return
+            if image.get("state") == "DELETE_FAILED":
+                raise CloudboxError(
+                    "image_delete_failed",
+                    "AWS could not delete the image.",
+                    image_arn=image_arn,
+                )
+        except TRANSIENT_IMAGE_READ_ERRORS:
+            # Keep checking a submitted deletion through short network failures.
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise CloudboxError(
                 "image_delete_pending",
                 "The image deletion is still running.",
                 image_arn=image_arn,
             )
-        time.sleep(POLL_SECONDS)
+        time.sleep(min(POLL_SECONDS, remaining))
 
 
 def main(argv=None):
@@ -320,7 +379,7 @@ def main(argv=None):
                     "confirmation_required",
                     "Pass --confirm-name with the configured image name.",
                 )
-            image = owned_image(client, image_arn)
+            image = wait_until_deletable(client, image_arn, wait=arguments.wait)
             if image is None:
                 emit(
                     {
@@ -343,8 +402,8 @@ def main(argv=None):
                 if not page.get("nextToken"):
                     break
                 request["nextToken"] = page["nextToken"]
-            if image.get("state") != "DELETING":
-                client.delete_microvm_image(imageIdentifier=image_arn)
+            if image and image.get("state") != "DELETING":
+                delete_image_once(session, image_arn)
             if arguments.wait:
                 wait_for_deletion(client, image_arn)
             emit(

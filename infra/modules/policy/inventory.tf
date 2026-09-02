@@ -41,7 +41,12 @@ output "resource_manifest" {
         kind     = "secret"
         identity = { name = local.secret_name }
       }
-      }, { for address in [
+      }, local.github_enabled ? {
+      "aws_secretsmanager_secret.github[0]" = {
+        kind     = "secret"
+        identity = { name = local.github_secret_name }
+      }
+      } : {}, { for address in [
         "aws_s3_bucket_public_access_block.data",
         "aws_s3_bucket_ownership_controls.data",
         "aws_s3_bucket_server_side_encryption_configuration.data",

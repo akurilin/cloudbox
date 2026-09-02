@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 ROOT = Path(__file__).resolve().parent.parent
 TERRAFORM_OUTPUT = "cloudbox"
 SCHEMA_VERSION = 1
+GITHUB_SCHEMA_VERSION = 2
 DEFAULT_TIMEOUT_SECONDS = 600
 MAX_TIMEOUT_SECONDS = 3300
 MIN_TIMEOUT_SECONDS = 60

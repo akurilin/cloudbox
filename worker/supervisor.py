@@ -1,18 +1,24 @@
 """Run Pi once, save its JSON artifact, and stop the current AWS MicroVM."""
 
+import base64
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from github_access import (
+    child_environment, github_contract, github_environment, revoke_token, validate_github_spec,
+)
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 600
@@ -24,6 +30,42 @@ MAX_RESULT_BYTES = 1024 * 1024
 MAX_SPEC_BYTES = MAX_RESULT_BYTES
 MAX_BLOCKED_REASON_CHARACTERS = 1024
 STDERR_CHUNK_BYTES = 8192
+MAX_TRACE_TEXT_BYTES = 8 * 1024
+MAX_TRACE_RECORD_BYTES = 16 * 1024
+TRACE_ENVELOPE_BYTES = 512
+MAX_TRACE_METADATA_BYTES = MAX_TRACE_RECORD_BYTES - TRACE_ENVELOPE_BYTES
+MAX_TRACE_DEPTH = 12
+MAX_TRACE_ITEMS = 64
+MAX_TRACE_NODES = 512
+MAX_SECRET_FIELD_CHARACTERS = 128
+REDACTED = "[redacted]"
+OMITTED = "[omitted]"
+TRUNCATED = "[truncated]"
+HIDDEN_TRACE_TYPES = {"thinking", "reasoning", "redacted_thinking", "image", "audio", "video", "binary"}
+HIDDEN_TRACE_FIELDS = {
+    "thinking", "reasoning", "reasoningdetails", "thinkingsignature", "textsignature", "signature",
+    "encryptedcontent", "image", "audio", "video", "binary",
+}
+SECRET_FIELD_PATTERN = re.compile(
+    r"password|passwd|secret|credential|authorization|apikey|accesskey|sessiontoken|refreshtoken|"
+    r"accesstoken|ghtoken|githubtoken|privatekey|amzsignature|^token$",
+)
+SECRET_VALUE_PATTERNS = (
+    re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----.*?(?:-----END (?:[A-Z]+ )?PRIVATE KEY-----|$)", re.DOTALL),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{16,})\b"),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+    re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9_./+=-]+", re.IGNORECASE),
+)
+SECRET_ASSIGNMENT_PATTERN = re.compile(
+    rf'''(?<![A-Za-z0-9_.-])(?P<key>["']?[A-Za-z0-9_.-]{{0,{MAX_SECRET_FIELD_CHARACTERS}}}'''
+    r'''(?:password|passwd|secret|credential|authorization|api[_.-]?key|access[_.-]?key|token|'''
+    rf'''private[_.-]?key|amz[_.-]?signature)[A-Za-z0-9_.-]{{0,{MAX_SECRET_FIELD_CHARACTERS}}}["']?)\s*[:=]\s*'''
+    r'''(?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]\[{"'&]+)''',
+    re.IGNORECASE,
+)
+URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/\s:@]+:[^@\s/]+@", re.IGNORECASE)
+REASONING_TAG_PATTERN = re.compile(r"<(?:think|thinking|reasoning)>.*?(?:</(?:think|thinking|reasoning)>|$)", re.DOTALL | re.IGNORECASE)
 OUTPUT_PATH = Path("output/result.json")
 PROVIDER = "openrouter"
 APPLICATION_DIR = Path(__file__).resolve().parent
@@ -41,6 +83,10 @@ AGENT_CONTRACT = (
     f"{MAX_RESULT_BYTES} bytes. Your final reply must be only the JSON object "
     '{"status":"completed"}. If you cannot complete the task, do not wait for input; '
     'reply only {"status":"blocked","reason":"short reason"}.'
+    " Use only access granted to this run. Do not discover or take credentials, exploit systems, "
+    "or bypass access controls. You can install public dependencies inside the sandbox. "
+    "If a required tool or permission cannot be obtained through authorized means, return "
+    "the blocked status with the missing requirement in reason."
 )
 
 
@@ -49,7 +95,7 @@ def utc_now():
 
 
 def emit(run_id, event_type, **metadata):
-    # Only callers' selected metadata goes to managed CloudWatch forwarding.
+    # Pi content passes the activity filter before managed CloudWatch forwarding.
     record = {"run_id": run_id, "timestamp": utc_now(), "event": event_type, **metadata}
     with LOG_LOCK:
         print(json.dumps(record, separators=(",", ":"), allow_nan=False), flush=True)
@@ -80,14 +126,144 @@ def number(value):
     )
 
 
+def field_name(value):
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def secret_field(value):
+    return bool(SECRET_FIELD_PATTERN.search(field_name(value)))
+
+
+def runtime_trace_secrets(session, credentials):
+    # Use the normal SDK provider; never read credential files for logging.
+    values = list(credentials.values())
+    try:
+        source = session.get_credentials()
+        if source is not None:
+            frozen = source.get_frozen_credentials()
+            values.extend((frozen.access_key, frozen.secret_key, frozen.token))
+    except Exception:
+        # Known data and environment credentials still pass through redaction.
+        pass
+    return tuple(value for value in values if isinstance(value, str) and value)
+
+
+class ActivityFilter:
+    def __init__(self, secrets):
+        variants = set()
+        for value in secrets:
+            if isinstance(value, str) and value:
+                variants.update((value, quote(value, safe=""), json.dumps(value)[1:-1],
+                                 base64.b64encode(value.encode()).decode(),
+                                 base64.urlsafe_b64encode(value.encode()).decode()))
+        self.secrets = sorted(variants, key=len, reverse=True)
+        self.truncated = False
+        self.nodes_left = MAX_TRACE_NODES
+
+    def text(self, value):
+        # Redact the full value first, so truncation cannot expose half a token.
+        for secret in self.secrets:
+            value = value.replace(secret, REDACTED)
+        value = REASONING_TAG_PATTERN.sub(OMITTED, value)
+        for pattern in SECRET_VALUE_PATTERNS:
+            value = pattern.sub(REDACTED, value)
+        value = URL_CREDENTIAL_PATTERN.sub(r"\1" + REDACTED + "@", value)
+
+        def redact_assignment(match):
+            if secret_field(match.group("key")):
+                return match.group()[:match.start("value") - match.start()] + REDACTED
+            return match.group()
+
+        value = SECRET_ASSIGNMENT_PATTERN.sub(redact_assignment, value)
+        raw = value.encode("utf-8", errors="replace")
+        if len(raw) > MAX_TRACE_TEXT_BYTES:
+            self.truncated = True
+            return raw[:MAX_TRACE_TEXT_BYTES - len(TRUNCATED)].decode("utf-8", errors="ignore") + TRUNCATED
+        return value
+
+    def value(self, value, depth=0):
+        self.nodes_left -= 1
+        if depth > MAX_TRACE_DEPTH or self.nodes_left < 0:
+            self.truncated = True
+            return TRUNCATED
+        if isinstance(value, str):
+            return self.text(value)
+        if value is None or isinstance(value, bool) or number(value):
+            return value
+        if isinstance(value, dict):
+            if isinstance(value.get("type"), str) and value["type"] in HIDDEN_TRACE_TYPES:
+                return OMITTED
+            result = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= MAX_TRACE_ITEMS or self.nodes_left <= 0:
+                    self.truncated = True
+                    result["trace_truncated"] = True
+                    break
+                if not isinstance(key, str) or field_name(key) in HIDDEN_TRACE_FIELDS:
+                    continue
+                result[self.text(key)] = REDACTED if secret_field(key) else self.value(item, depth + 1)
+            return result
+        if isinstance(value, (list, tuple)):
+            result = []
+            for index, item in enumerate(value):
+                if index >= MAX_TRACE_ITEMS or self.nodes_left <= 0:
+                    self.truncated = True
+                    result.append(TRUNCATED)
+                    break
+                result.append(self.value(item, depth + 1))
+            return result
+        # Do not call repr: unknown objects and binary values can contain secrets.
+        return OMITTED
+
+    def record(self, metadata):
+        self.truncated = False
+        self.nodes_left = MAX_TRACE_NODES
+        try:
+            safe = self.value(metadata)
+            if self.truncated:
+                safe["trace_truncated"] = True
+            encoded = json.dumps(safe, separators=(",", ":"), allow_nan=False)
+            if len(encoded.encode()) <= MAX_TRACE_METADATA_BYTES:
+                return safe
+            # Escaped Unicode and many short fields can exceed the per-value cap.
+            preview = encoded[:MAX_TRACE_TEXT_BYTES]
+            while True:
+                fallback = {"trace_preview": preview + TRUNCATED, "trace_truncated": True}
+                if len(json.dumps(fallback).encode()) <= MAX_TRACE_METADATA_BYTES:
+                    return fallback
+                preview = preview[:len(preview) // 2]
+        except (ValueError, TypeError, RecursionError, UnicodeError):
+            return {"trace_unavailable": True}
+
+
+def visible_content(value):
+    if not isinstance(value, list):
+        return []
+    return [{"type": "text", "text": item["text"]} for item in value
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)]
+
+
+def visible_result(value):
+    if not isinstance(value, dict):
+        return {"unavailable": True}
+    result = {"content": visible_content(value.get("content"))}
+    if "details" in value:
+        result["details"] = value["details"]
+    return result
+
+
 class PiEvents:
-    def __init__(self, run_id):
+    def __init__(self, run_id, secrets=()):
         self.run_id = run_id
+        self.activity_filter = ActivityFilter(secrets)
         self.final_message = None
         self.usage = {key: 0 for key in TOKEN_FIELDS}
         self.usage["estimated_cost_usd"] = 0
         self.seen_messages = set()
         self.tools_started = {}
+
+    def trace(self, event_type, **metadata):
+        emit(self.run_id, event_type, **self.activity_filter.record(metadata))
 
     def read_stdout(self, stream):
         for line in stream:
@@ -120,12 +296,15 @@ class PiEvents:
             cost = usage.get("cost", {}).get("total")
             if number(cost):
                 self.usage["estimated_cost_usd"] += cost
-            emit(
-                self.run_id,
-                "model_message",
-                stop_reason=message.get("stopReason"),
-                usage=selected_usage,
-            )
+            text = "".join(item["text"] for item in visible_content(message.get("content")))
+            metadata = {
+                "stop_reason": message.get("stopReason"),
+                "usage": selected_usage,
+                "text": text,
+            }
+            if isinstance(message.get("errorMessage"), str):
+                metadata["error_message"] = message["errorMessage"]
+            self.trace("model_message", **metadata)
         elif event_type in {"tool_execution_start", "tool_execution_end"}:
             tool_id = event.get("toolCallId")
             tool_name = event.get("toolName")
@@ -134,12 +313,14 @@ class PiEvents:
             metadata = {"tool_call_id": tool_id, "tool_name": tool_name}
             if event_type == "tool_execution_start":
                 self.tools_started[tool_id] = time.monotonic()
+                metadata["arguments"] = event.get("args")
             else:
                 started = self.tools_started.pop(tool_id, None)
                 metadata["outcome"] = "error" if event.get("isError") else "ok"
                 if started is not None:
                     metadata["duration_seconds"] = round(time.monotonic() - started, 3)
-            emit(self.run_id, event_type, **metadata)
+                metadata["result"] = visible_result(event.get("result"))
+            self.trace(event_type, **metadata)
         elif event_type in {
             "agent_start",
             "agent_settled",
@@ -149,7 +330,7 @@ class PiEvents:
             metadata = {
                 key: event[key] for key in ("attempt", "success") if key in event
             }
-            emit(self.run_id, event_type, **metadata)
+            self.trace(event_type, **metadata)
 
     def completion(self):
         message = self.final_message
@@ -214,9 +395,8 @@ def run_script(name, workspace, deadline, run_id):
         stop_process(process)
 
 
-def run_pi(spec, key, workspace, deadline, run_id):
-    events = PiEvents(run_id)
-    environment = os.environ.copy()
+def run_pi(spec, key, workspace, deadline, run_id, access_environment=None, redaction_secrets=()):
+    environment = child_environment()
     environment.update(
         {
             "OPENROUTER_API_KEY": key,
@@ -226,6 +406,10 @@ def run_pi(spec, key, workspace, deadline, run_id):
             "CLOUDBOX_RESULT_PATH": str(workspace / OUTPUT_PATH),
         }
     )
+    environment.update(access_environment or {})
+    secrets = [*redaction_secrets, key]
+    secrets.extend(value for name, value in environment.items() if secret_field(name))
+    events = PiEvents(run_id, secrets)
     command = [
         "pi",
         "--mode",
@@ -243,7 +427,7 @@ def run_pi(spec, key, workspace, deadline, run_id):
         "--model",
         spec["model"],
         "--append-system-prompt",
-        AGENT_CONTRACT,
+        AGENT_CONTRACT + github_contract(spec),
     ]
     process = subprocess.Popen(
         command,
@@ -279,7 +463,7 @@ def run_pi(spec, key, workspace, deadline, run_id):
     ]
     for reader in readers:
         reader.start()
-    emit(run_id, "agent_launch", model=spec["model"], provider=PROVIDER)
+    events.trace("agent_launch", model=spec["model"], provider=PROVIDER)
     timed_out = False
     try:
         remaining = deadline - time.monotonic()
@@ -319,8 +503,7 @@ def artifact_bytes(workspace):
 
 
 def validate_spec(spec):
-    if spec.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("invalid_spec")
+    validate_github_spec(spec)
     prompt = spec.get("prompt")
     if (
         not isinstance(prompt, str)
@@ -377,12 +560,14 @@ def supervise(microvm_id, payload):
         spec = json.loads(spec_bytes)
         validate_spec(spec)
         deadline = started + spec["timeout_seconds"]
+        result["schema_version"] = spec["schema_version"]
+        access_environment = github_environment(spec, payload, workspace, deadline)
         put_json(
             s3,
             bucket,
             f"{prefix}/launch.json",
             {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": spec["schema_version"],
                 "run_id": run_id,
                 "microvm_id": microvm_id,
                 "image_arn": spec["image_arn"],
@@ -404,7 +589,13 @@ def supervise(microvm_id, payload):
         work_deadline = deadline - CLEANUP_SECONDS
         run_script("startup.sh", workspace, work_deadline, run_id)
         exit_code, timed_out, events = run_pi(
-            spec, key, workspace, work_deadline, run_id
+            spec,
+            key,
+            workspace,
+            work_deadline,
+            run_id,
+            access_environment,
+            runtime_trace_secrets(runtime, credentials),
         )
         result["exit_code"] = exit_code
         if timed_out:
@@ -443,6 +634,9 @@ def supervise(microvm_id, payload):
             if result["status"] == "succeeded":
                 result.update(status="failed", reason="output_upload_error")
             emit(run_id, "output_error", error_type=type(error).__name__)
+        if payload.get("github_token"):
+            result["github_token_revoked"] = revoke_token(payload["github_token"], deadline - STOP_GRACE_SECONDS)
+            emit(run_id, "github_token_revocation", confirmed=result["github_token_revoked"])
         try:
             if workspace.exists():
                 run_script(

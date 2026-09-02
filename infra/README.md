@@ -39,6 +39,38 @@ directly to Secrets Manager. The image script owns MicroVM images and source
 archives: the pinned AWS provider lacks the hook, memory, and logging fields
 needed by this worker. Setup selects an exact successful image version.
 
+## Optional GitHub access
+
+Add all three fields under `deployment` in the selected input file. Replace
+these sample IDs with the App, installation, and allowed repository IDs:
+
+```json
+"github_app_id": 12345,
+"github_installation_id": 67890,
+"github_repository_ids": [24680]
+```
+
+Use 1-500 unique repository IDs. Omit all three fields to disable GitHub access.
+Terraform creates separate App key metadata and grants key reads only to the
+provisioner. Worker roles and boundaries cannot read this key.
+
+For first setup, supply the PEM file:
+
+```sh
+uv run python scripts/setup.py --env test --github-key-file /path/to/private-key.pem
+```
+
+Later setup runs reuse the saved key if this argument is absent. To replace it:
+
+```sh
+uv run python scripts/set_github_secret.py --env test --key-file /path/to/private-key.pem
+```
+
+Keep the PEM file outside the repository. No key value enters Terraform state.
+Resource checks and teardown cover both secrets. `--force-delete-secret`
+removes recovery for both. Run teardown before removing the GitHub input fields;
+checks reject an existing GitHub secret without matching configuration.
+
 ## Resource checks
 
 Terraform state records managed objects; it is not an account inventory.

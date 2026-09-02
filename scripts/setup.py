@@ -32,8 +32,10 @@ from cloudbox.common import (
     operator_session,
 )
 from cloudbox.environments import add_environment_argument, get_environment
+from cloudbox.github import MAX_TOKEN_REPOSITORIES
 from scripts.build_image import ensure_image
 from scripts.set_secret import key_from_file
+from scripts.set_github_secret import GITHUB_SECRET_SUFFIX, private_key_from_file, secret_has_value, store_private_key
 
 REQUIRED_TOOLS = ("terraform", "aws")
 INPUT_FIELDS = {
@@ -47,7 +49,11 @@ INPUT_FIELDS = {
     "memory_mib",
     "default_model",
     "timeout_seconds",
+    "github_app_id",
+    "github_installation_id",
+    "github_repository_ids",
 }
+GITHUB_INPUT_FIELDS = {"github_app_id", "github_installation_id", "github_repository_ids"}
 REQUIRED_FIELDS = {"aws_account_id", "aws_region", "aws_profile", "project_name"}
 MEMORY_SIZES = {512, 1024, 2048, 4096, 8192}
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
@@ -125,6 +131,31 @@ def read_config(environment):
             raise CloudboxError(
                 "invalid_config",
                 "Use an exact image version, or leave it unset for setup.",
+            )
+    if GITHUB_INPUT_FIELDS & config.keys():
+        if GITHUB_INPUT_FIELDS - config.keys():
+            raise CloudboxError(
+                "invalid_config", "Set all three GitHub fields, or omit them."
+            )
+        ids = [config["github_app_id"], config["github_installation_id"]]
+        repositories = config["github_repository_ids"]
+        if (
+            not isinstance(repositories, list)
+            or not 1 <= len(repositories) <= MAX_TOKEN_REPOSITORIES
+        ):
+            raise CloudboxError(
+                "invalid_config",
+                f"Set 1 to {MAX_TOKEN_REPOSITORIES} allowed GitHub repository IDs.",
+            )
+        if any(
+            type(value) is not int or value <= 0 for value in [*ids, *repositories]
+        ):
+            raise CloudboxError(
+                "invalid_config", "GitHub IDs must be positive integers."
+            )
+        if len(set(repositories)) != len(repositories):
+            raise CloudboxError(
+                "invalid_config", "Allowed GitHub repository IDs must be unique."
             )
     return document, raw
 
@@ -343,6 +374,11 @@ def main(argv=None):
             help="Read the OpenRouter key from this file instead of .env.<env>.",
         )
         parser.add_argument(
+            "--github-key-file",
+            type=Path,
+            help="Load the GitHub App PEM key; required for first GitHub setup.",
+        )
+        parser.add_argument(
             "--yes",
             action="store_true",
             help="Approve all setup stages without a prompt.",
@@ -357,7 +393,11 @@ def main(argv=None):
         check_local_state(config, environment)
         secret = key_from_file(arguments.env_file or environment.key_path)
         validate_key(secret)
-        operator_session(config, provisioner=False)
+        github_enabled = "github_app_id" in config
+        if arguments.github_key_file and not github_enabled:
+            raise CloudboxError("github_not_configured", "Set all three GitHub fields before loading the key.")
+        github_secret = private_key_from_file(arguments.github_key_file) if arguments.github_key_file else None
+        admin = operator_session(config, provisioner=False)
         from cloudbox.resources import check_resources
 
         inventory = check_resources(environment)
@@ -366,14 +406,24 @@ def main(argv=None):
                 "untracked_resources",
                 "Resolve resources outside the selected state before setup.",
             )
-        if inventory["secret"] == "pending_deletion":
+        if "pending_deletion" in inventory["secrets"].values():
             raise CloudboxError(
                 "secret_pending_deletion",
-                "Remove or restore the pending secret before setup.",
+                "Remove or restore pending secrets before setup.",
             )
+        if github_enabled and github_secret is None:
+            secret_name = f"{config['project_name']}/{GITHUB_SECRET_SUFFIX}"
+            if (
+                inventory["secrets"].get(secret_name) != "active"
+                or not secret_has_value(admin, secret_name)
+            ):
+                raise CloudboxError(
+                    "github_key_required",
+                    "Supply --github-key-file for first GitHub setup.",
+                )
         print(
             f"Environment: {environment.name}\nAccount: {config['aws_account_id']}\nRegion: {config['aws_region']}\n"
-            "Steps: IAM bootstrap; infrastructure; secret; image; image selection.\n"
+            "Steps: IAM bootstrap; infrastructure; secrets; image; image selection.\n"
             "AWS charges apply. Setup does not submit jobs or delete resources.",
             file=sys.stderr,
         )
@@ -409,6 +459,10 @@ def main(argv=None):
                 SecretString=secret,
             )
             del secret
+            if github_secret is not None:
+                stage = "github_secret"
+                store_private_key(session, deployment, github_secret)
+                del github_secret
             stage = "image"
             print("Setup: build or reuse image", file=sys.stderr, flush=True)
             image = ensure_image(deployment, session=session, wait=True)

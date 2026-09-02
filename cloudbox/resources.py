@@ -15,6 +15,8 @@ S3_TAGS_MISSING = {"NoSuchTagSet"}
 RESOURCE_MISSING = {"ResourceNotFoundException"}
 IAM_MISSING = {"NoSuchEntity"}
 SECRET_ADDRESS = "aws_secretsmanager_secret.openrouter"
+GITHUB_SECRET_ADDRESS = "aws_secretsmanager_secret.github[0]"
+GITHUB_SECRET_DECLARATION = GITHUB_SECRET_ADDRESS.split("[", 1)[0]
 RESOURCE_HEADER = re.compile(
     r'^\s*resource\s+"([^"\n]+)"\s+"([^"\n]+)"\s*\{', re.MULTILINE
 )
@@ -45,7 +47,6 @@ SINGLETON_ADDRESSES = {
         "aws_s3_bucket_lifecycle_configuration.runs",
     },
     "log_group": {"aws_cloudwatch_log_group.worker"},
-    "secret": {SECRET_ADDRESS},
 }
 SCOPE = {
     "services": ["IAM", "S3", "Secrets Manager", "CloudWatch Logs", "Lambda MicroVMs"],
@@ -124,6 +125,22 @@ def check_identity(address, values, expected, config, *, allow_unknown=False):
                 )
 
 
+def secret_targets(names):
+    # Preserve the OpenRouter target and add the optional submitter-only App key.
+    targets = {SECRET_ADDRESS: names["secret_name"]}
+    if names.get("github_secret_name"):
+        targets[GITHUB_SECRET_ADDRESS] = names["github_secret_name"]
+    return targets
+
+
+def covered_declarations(resources, names, *, main):
+    covered = {address.split("[", 1)[0] for address in resources}
+    if main and not names.get("github_secret_name"):
+        # A disabled count resource has a declaration but no live instance.
+        covered.add(GITHUB_SECRET_DECLARATION)
+    return covered
+
+
 def check_declarations(environment, manifest, names):
     # This spike supports flat HCL roots and a resource-free policy module.
     for label, directory in (
@@ -137,7 +154,7 @@ def check_declarations(environment, manifest, names):
             )
         source = "\n".join(path.read_text() for path in directory.glob("*.tf"))
         declared = {f"{kind}.{name}" for kind, name in RESOURCE_HEADER.findall(source)}
-        covered = {address.split("[", 1)[0] for address in manifest[label]}
+        covered = covered_declarations(manifest[label], names, main=label == "main")
         if declared != covered or set(MODULE_HEADER.findall(source)) != {"policy"}:
             raise CloudboxError(
                 "inventory_coverage",
@@ -189,7 +206,6 @@ def check_declarations(environment, manifest, names):
         "bucket": {"bucket": names["bucket_name"]},
         "bucket_setting": {"bucket": names["bucket_name"]},
         "log_group": {"name": names["log_group_name"]},
-        "secret": {"name": names["secret_name"]},
     }
     for kind, supported in SINGLETON_ADDRESSES.items():
         selected = {
@@ -205,6 +221,18 @@ def check_declarations(environment, manifest, names):
                 "Extend the service adapter before adding a target.",
                 kind=kind,
             )
+    secrets = {
+        address: item["identity"]
+        for address, item in all_resources.items()
+        if item["kind"] == "secret"
+    }
+    if secrets != {
+        address: {"name": name} for address, name in secret_targets(names).items()
+    }:
+        raise CloudboxError(
+            "inventory_coverage",
+            "The secret inventory does not match the configured targets.",
+        )
     roles = {
         item["identity"].get("name") or item["identity"]["arn"].rsplit("/", 1)[1]
         for item in all_resources.values()
@@ -289,13 +317,13 @@ def check_plan_coverage(directory, plan, environment):
     from scripts.setup import read_config
 
     config = read_config(environment)[0]["deployment"]
-    _, expected = terraform_manifest(environment)
+    names, expected = terraform_manifest(environment)
     targets = expected[directory]
     # Terraform's parsed configuration also catches module and JSON additions.
     root = plan.get("configuration", {}).get("root_module", {})
     resources = root.get("resources", [])
     declared = {item["address"] for item in resources if item.get("mode") == "managed"}
-    covered = {address.split("[", 1)[0] for address in targets}
+    covered = covered_declarations(targets, names, main=directory == environment.main_root)
     if declared != covered:
         raise CloudboxError(
             "inventory_coverage",
@@ -366,22 +394,27 @@ def inventory(session, names, config, expected):
             objects.extend({"Key": item["Key"]} for item in page.get("Contents", []))
         for page in s3.get_paginator("list_multipart_uploads").paginate(**bucket):
             uploads.extend(page.get("Uploads", []))
-    secret = optional_call(
-        session.client("secretsmanager", config=SDK_CONFIG).describe_secret,
-        RESOURCE_MISSING,
-        SecretId=names["secret_name"],
-    )
-    if secret:
-        check_tags(secret.get("Tags", []), config)
-        prefix = f"arn:aws:secretsmanager:{config['aws_region']}:{config['aws_account_id']}:secret:{names['secret_name']}-"
-        if secret["Name"] != names["secret_name"] or not secret["ARN"].startswith(
-            prefix
-        ):
-            raise CloudboxError(
-                "secret_mismatch", "The secret identity does not match this deployment."
+    secrets = {}
+    for address, name in secret_targets(names).items():
+        secret = optional_call(
+            session.client("secretsmanager", config=SDK_CONFIG).describe_secret,
+            RESOURCE_MISSING,
+            SecretId=name,
+        )
+        secrets[address] = secret
+        if secret:
+            check_tags(secret.get("Tags", []), config)
+            prefix = (
+                f"arn:aws:secretsmanager:{config['aws_region']}:"
+                f"{config['aws_account_id']}:secret:{name}-"
             )
-        if not secret.get("DeletedDate"):
-            present.add(SECRET_ADDRESS)
+            if secret["Name"] != name or not secret["ARN"].startswith(prefix):
+                raise CloudboxError(
+                    "secret_mismatch",
+                    "The secret identity does not match this deployment.",
+                )
+            if not secret.get("DeletedDate"):
+                present.add(address)
     iam = session.client("iam", config=SDK_CONFIG)
     targets = {
         address: resource
@@ -454,7 +487,8 @@ def inventory(session, names, config, expected):
         "vms": list_vms(compute, names),
         "objects": objects,
         "uploads": uploads,
-        "secret": secret,
+        "secret": secrets[SECRET_ADDRESS],
+        "secrets": secrets,
         "orphans": orphan_resources(session, names, config, targets, roles),
     }
 
@@ -533,11 +567,12 @@ def orphan_resources(session, names, config, targets, owned_roles):
             if belongs(bucket["Name"], (response or {}).get("TagSet", [])):
                 orphans.add(f"arn:aws:s3:::{bucket['Name']}")
     secrets = session.client("secretsmanager", config=SDK_CONFIG)
+    secret_names = set(secret_targets(names).values())
     for page in secrets.get_paginator("list_secrets").paginate(
         IncludePlannedDeletion=True
     ):
         for secret in page["SecretList"]:
-            if secret["Name"] != names["secret_name"] and belongs(
+            if secret["Name"] not in secret_names and belongs(
                 secret["Name"], secret.get("Tags", [])
             ):
                 orphans.add(secret["ARN"])
@@ -586,13 +621,12 @@ def resource_context(environment):
         for directory, targets in expected.items()
     }
     found = inventory(admin, names, config, expected)
-    state_secret = saved[environment.main_root].get(SECRET_ADDRESS)
-    if (
-        state_secret
-        and found["secret"]
-        and state_secret["arn"] != found["secret"]["ARN"]
-    ):
-        raise CloudboxError("secret_mismatch", "The saved and live secret ARNs differ.")
+    for address, secret in found["secrets"].items():
+        state_secret = saved[environment.main_root].get(address)
+        if state_secret and secret and state_secret["arn"] != secret["ARN"]:
+            raise CloudboxError(
+                "secret_mismatch", "The saved and live secret ARNs differ."
+            )
     return config, original, admin, names, expected, saved, found
 
 
@@ -606,10 +640,18 @@ def resource_report(environment, config, names, saved, found):
         found["present"]
         or found["image"]
         or active
-        or found["secret"]
+        or any(found["secrets"].values())
         or found["orphans"]
         or not empty_state
     )
+    secrets = {
+        name: "pending_deletion"
+        if found["secrets"][address] and found["secrets"][address].get("DeletedDate")
+        else "active"
+        if found["secrets"][address]
+        else "absent"
+        for address, name in secret_targets(names).items()
+    }
     return {
         "ok": True,
         "environment": environment.name,
@@ -627,11 +669,8 @@ def resource_report(environment, config, names, saved, found):
         "bucket": names["bucket_name"],
         "objects": len(found["objects"]),
         "multipart_uploads": len(found["uploads"]),
-        "secret": "pending_deletion"
-        if found["secret"] and found["secret"].get("DeletedDate")
-        else "active"
-        if found["secret"]
-        else "absent",
+        "secret": secrets[names["secret_name"]],
+        "secrets": secrets,
         "scope": SCOPE,
     }
 

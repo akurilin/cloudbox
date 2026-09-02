@@ -11,7 +11,8 @@ from supervisor import supervise
 HOOK_PORT = 8080
 HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
 MAX_HOOK_BODY_BYTES = 64 * 1024
-SCHEMA_VERSION = 1
+SCHEMA_VERSIONS = {1, 2}
+GITHUB_SCHEMA_VERSION = 2
 RUN_LOCK = threading.Lock()
 active_run = None
 
@@ -45,8 +46,14 @@ class HookHandler(BaseHTTPRequestHandler):
             # AWS IDs are opaque. A guessed prefix rejected valid cloud runs.
             if not isinstance(microvm_id, str) or not microvm_id:
                 raise ValueError("Invalid VM ID")
-            if payload["schema_version"] != SCHEMA_VERSION:
+            if payload["schema_version"] not in SCHEMA_VERSIONS:
                 raise ValueError("Unsupported hook schema")
+            if payload["schema_version"] == GITHUB_SCHEMA_VERSION:
+                for field in ("github_token", "github_token_expires_at"):
+                    if not isinstance(payload[field], str) or not payload[field]:
+                        raise ValueError("Missing GitHub credentials")
+            elif payload.get("github_token"):
+                raise ValueError("Unexpected GitHub credentials")
             run_id = payload["run_id"]
             if str(uuid.UUID(run_id)) != run_id:
                 raise ValueError("Invalid run ID")

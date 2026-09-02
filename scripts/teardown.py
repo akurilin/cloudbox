@@ -37,7 +37,7 @@ from cloudbox.resources import (
     saved_resources,
     state_remains,
 )
-from scripts.build_image import owned_image, wait_for_deletion
+from scripts.build_image import delete_image_once, wait_for_deletion, wait_until_deletable
 
 VM_STOPPING = "TERMINATING"
 POLL_SECONDS = 5
@@ -87,11 +87,11 @@ def remove_compute(session, names, config):
                 "VMs have not stopped. Run teardown again after they stop.",
             )
         time.sleep(POLL_SECONDS)
-    image = owned_image(compute, names["image_arn"])
+    image = wait_until_deletable(compute, names["image_arn"], wait=True)
     if image:
         check_tags(image.get("tags", {}), config, owner=IMAGE_OWNER)
         if image["state"] != "DELETING":
-            compute.delete_microvm_image(imageIdentifier=names["image_arn"])
+            delete_image_once(session, names["image_arn"])
         wait_for_deletion(compute, names["image_arn"])
 
 
@@ -169,7 +169,7 @@ def main(argv=None):
         parser.add_argument(
             "--force-delete-secret",
             action="store_true",
-            help="Delete the secret without recovery, for a clean rebuild.",
+            help="Delete configured secrets without recovery, for a clean rebuild.",
         )
         arguments = parser.parse_args(argv)
         environment = get_environment(arguments.env)
@@ -259,10 +259,11 @@ def main(argv=None):
                 )
             stage = "secret"
             guard()
-            if arguments.force_delete_secret and found["secret"]:
-                # With empty main state, only an ownership-checked scheduled secret can remain.
+            if arguments.force_delete_secret and any(found["secrets"].values()):
+                # Empty state permits only ownership-checked scheduled secrets.
                 session = operator_session(deployment) if saved[main_root] else admin
-                force_delete_secret(session, found["secret"])
+                for secret in found["secrets"].values():
+                    force_delete_secret(session, secret)
             stage = "bootstrap"
             guard()
             if plans[bootstrap_root]:
@@ -292,23 +293,33 @@ def main(argv=None):
                 "Some Cloudbox resources remain. Inspect and run teardown again.",
                 inventory=report,
             )
-        pending = remaining["secret"]
-        if pending and (
-            arguments.force_delete_secret or not pending.get("DeletedDate")
+        pending = {
+            address: secret
+            for address, secret in remaining["secrets"].items()
+            if secret
+        }
+        if any(
+            arguments.force_delete_secret or not secret.get("DeletedDate")
+            for secret in pending.values()
         ):
             raise CloudboxError(
                 "secret_remains",
-                "The secret is not removed or scheduled for deletion.",
+                "A secret is not removed or scheduled for deletion.",
                 inventory=report,
             )
+        openrouter = remaining["secret"]
         emit(
             {
                 **report,
                 "deleted": True,
                 "all_resources_absent": report["clean"],
-                "secret_deletion_date": pending["DeletedDate"].isoformat()
-                if pending
+                "secret_deletion_date": openrouter["DeletedDate"].isoformat()
+                if openrouter
                 else None,
+                "secret_deletion_dates": {
+                    secret["Name"]: secret["DeletedDate"].isoformat()
+                    for secret in pending.values()
+                },
                 "local_files_retained": True,
             }
         )

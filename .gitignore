@@ -1,6 +1,7 @@
 # Keep credentials and deployment state out of source control.
 .env
 .env.*
+*.pem
 !.env.example
 !.env.test.example
 !.env.prod.example
