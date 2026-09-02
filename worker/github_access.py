@@ -24,7 +24,10 @@ GIT_CONFIG = (
 
 def validate_github_spec(spec):
     # Version 3 uses the finish tool; older workers reject these jobs.
-    if type(spec.get("schema_version")) is not int or spec["schema_version"] != RUN_SCHEMA_VERSION:
+    if (
+        type(spec.get("schema_version")) is not int
+        or spec["schema_version"] != RUN_SCHEMA_VERSION
+    ):
         raise ValueError("invalid_spec")
     access = spec.get("github")
     if access is None:
@@ -37,21 +40,33 @@ def validate_github_spec(spec):
     if not isinstance(repositories, list) or not repositories:
         raise ValueError("invalid_github_repositories")
     for repository in repositories:
-        if (not isinstance(repository, dict) or type(repository.get("id")) is not int
-                or repository["id"] <= 0 or not isinstance(repository.get("full_name"), str)
-                or not REPOSITORY_PATTERN.fullmatch(repository["full_name"])):
+        if (
+            not isinstance(repository, dict)
+            or type(repository.get("id")) is not int
+            or repository["id"] <= 0
+            or not isinstance(repository.get("full_name"), str)
+            or not REPOSITORY_PATTERN.fullmatch(repository["full_name"])
+        ):
             raise ValueError("invalid_github_repository")
-    if (not isinstance(permissions, dict) or not permissions
-            or not permissions.keys() <= GITHUB_PERMISSIONS
-            or any(value not in ACCESS_LEVELS for value in permissions.values())):
+    if (
+        not isinstance(permissions, dict)
+        or not permissions
+        or not permissions.keys() <= GITHUB_PERMISSIONS
+        or any(value not in ACCESS_LEVELS for value in permissions.values())
+    ):
         raise ValueError("invalid_github_permissions")
     if not isinstance(identity, dict):
         raise ValueError("invalid_git_identity")
     for field in ("name", "email"):
         value = identity.get(field)
-        if (not isinstance(value, str) or not value.strip()
-                or any(ord(character) < ASCII_FIRST_PRINTABLE or ord(character) == ASCII_DELETE
-                       for character in value)):
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or any(
+                ord(character) < ASCII_FIRST_PRINTABLE or ord(character) == ASCII_DELETE
+                for character in value
+            )
+        ):
             raise ValueError("invalid_git_identity")
 
 
@@ -67,14 +82,27 @@ def github_environment(spec, payload, workspace, deadline):
     if not isinstance(token, str) or not token or not isinstance(expires_at, str):
         raise ValueError("missing_github_token")
     expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    if expiry.tzinfo is None or expiry.timestamp() <= time.time() + max(0, deadline - time.monotonic()):
+    if expiry.tzinfo is None or expiry.timestamp() <= time.time() + max(
+        0, deadline - time.monotonic()
+    ):
         raise ValueError("github_token_expiring")
-    environment = {"GH_TOKEN": token, "GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1",
-                   "GH_CONFIG_DIR": str(workspace / ".gh"), "GIT_TERMINAL_PROMPT": "0",
-                   "GIT_CONFIG_COUNT": str(len(GIT_CONFIG))}
+    environment = {
+        "GH_TOKEN": token,
+        "GH_HOST": "github.com",
+        "GH_PROMPT_DISABLED": "1",
+        "GH_CONFIG_DIR": str(workspace / ".gh"),
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_COUNT": str(len(GIT_CONFIG)),
+    }
     identity = spec["github"]["git_identity"]
-    environment.update({"GIT_AUTHOR_NAME": identity["name"], "GIT_AUTHOR_EMAIL": identity["email"],
-                        "GIT_COMMITTER_NAME": identity["name"], "GIT_COMMITTER_EMAIL": identity["email"]})
+    environment.update(
+        {
+            "GIT_AUTHOR_NAME": identity["name"],
+            "GIT_AUTHOR_EMAIL": identity["email"],
+            "GIT_COMMITTER_NAME": identity["name"],
+            "GIT_COMMITTER_EMAIL": identity["email"],
+        }
+    )
     for index, (key, value) in enumerate(GIT_CONFIG):
         environment[f"GIT_CONFIG_KEY_{index}"] = key
         environment[f"GIT_CONFIG_VALUE_{index}"] = value
@@ -95,8 +123,11 @@ def github_contract(spec):
 
 def child_environment():
     # Inherited tracing and auth settings must not expose or replace run credentials.
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith(("GIT_", "GH_", "GITHUB_"))}
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("GIT_", "GH_", "GITHUB_"))
+    }
 
 
 def revoke_token(token, deadline, client_factory=GitHubClient):
@@ -107,7 +138,9 @@ def revoke_token(token, deadline, client_factory=GitHubClient):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        client_factory(token, timeout=min(API_TIMEOUT_SECONDS, remaining)).request("DELETE", "/installation/token")
+        client_factory(token, timeout=min(API_TIMEOUT_SECONDS, remaining)).request(
+            "DELETE", "/installation/token"
+        )
         return True
     except Exception:
         return False

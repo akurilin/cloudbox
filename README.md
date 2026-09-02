@@ -108,6 +108,48 @@ Cloudbox records the agent's completion report. Review external changes
 independently. No automatic task retry is safe
 after a lost response: a GitHub action may already have completed.
 
+## Before a commit
+
+Install the native tools once (macOS):
+
+```sh
+brew install terraform-linters/tap/tflint hadolint gitleaks
+uv sync --dev
+```
+
+Terraform and uv are required above. On Linux, install TFLint, Hadolint, and
+Gitleaks from their release packages. [pre-commit](https://pre-commit.com/)
+installs and caches the remaining tools on the first run.
+
+Run only when the changes are ready to commit:
+
+```sh
+uv run pre-commit run --all-files
+```
+
+The checks apply style fixes. Review and stage changed files, then rerun until
+all checks pass. New files must be staged to be included. Do not run this suite
+after each edit or during routine reviews.
+
+| Tool                     | Check                                                      |
+| ------------------------ | ---------------------------------------------------------- |
+| Ruff                     | Python errors, imports, common bugs, and formatting        |
+| Terraform fmt and TFLint | Terraform formatting and language rules                    |
+| ShellCheck and shfmt     | Shell errors and formatting                                |
+| Prettier                 | Markdown, JSON, YAML, and JavaScript formatting            |
+| Hadolint                 | Dockerfile errors and shell commands                       |
+| Gitleaks                 | Secrets in the selected files; findings are redacted       |
+| pre-commit-hooks         | File syntax, merge conflicts, private keys, and whitespace |
+
+These checks use local files. They do not initialize Terraform or use AWS.
+Gitleaks checks file contents; it does not scan Git history.
+
+To run the checks automatically on staged files at each commit:
+
+```sh
+uv run pre-commit install
+```
+
 ## Local tests
 
 ```sh

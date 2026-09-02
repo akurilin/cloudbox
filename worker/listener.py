@@ -45,7 +45,10 @@ class HookHandler(BaseHTTPRequestHandler):
             # AWS IDs are opaque. A guessed prefix rejected valid cloud runs.
             if not isinstance(microvm_id, str) or not microvm_id:
                 raise ValueError("Invalid VM ID")
-            if type(payload["schema_version"]) is not int or payload["schema_version"] != RUN_SCHEMA_VERSION:
+            if (
+                type(payload["schema_version"]) is not int
+                or payload["schema_version"] != RUN_SCHEMA_VERSION
+            ):
                 raise ValueError("Unsupported hook schema")
             if "github_token" in payload or "github_token_expires_at" in payload:
                 for field in ("github_token", "github_token_expires_at"):

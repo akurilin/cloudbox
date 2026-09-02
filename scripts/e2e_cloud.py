@@ -67,9 +67,15 @@ def setup_arguments(arguments, config):
     # Check the replacement key before teardown can remove the stored copy.
     github_enabled = "github_app_id" in config
     if github_enabled and not arguments.github_key_file:
-        raise CloudboxError("github_key_required", "Supply --github-key-file before rebuilding GitHub-enabled test resources.")
+        raise CloudboxError(
+            "github_key_required",
+            "Supply --github-key-file before rebuilding GitHub-enabled test resources.",
+        )
     if arguments.github_key_file and not github_enabled:
-        raise CloudboxError("github_not_configured", "Configure GitHub before supplying --github-key-file.")
+        raise CloudboxError(
+            "github_not_configured",
+            "Configure GitHub before supplying --github-key-file.",
+        )
     values = ["--env", TEST_ENVIRONMENT, "--yes"]
     if arguments.env_file:
         values.extend(("--env-file", str(arguments.env_file)))

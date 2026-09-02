@@ -323,7 +323,9 @@ def check_plan_coverage(directory, plan, environment):
     root = plan.get("configuration", {}).get("root_module", {})
     resources = root.get("resources", [])
     declared = {item["address"] for item in resources if item.get("mode") == "managed"}
-    covered = covered_declarations(targets, names, main=directory == environment.main_root)
+    covered = covered_declarations(
+        targets, names, main=directory == environment.main_root
+    )
     if declared != covered:
         raise CloudboxError(
             "inventory_coverage",

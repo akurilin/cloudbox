@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from botocore.exceptions import ClientError, EndpointConnectionError
+
 from cloudbox.common import CloudboxError
 from scripts import build_image, teardown
 
@@ -41,8 +42,13 @@ class ImageCleanupTests(unittest.TestCase):
 
         def delete(**kwargs):
             # AWS refuses a delete while any image version still builds.
-            if current["parent"] in {"CREATING", "UPDATING"} or current["version"] != "SUCCESSFUL":
-                raise ClientError({"Error": {"Code": "ValidationException"}}, "DeleteMicrovmImage")
+            if (
+                current["parent"] in {"CREATING", "UPDATING"}
+                or current["version"] != "SUCCESSFUL"
+            ):
+                raise ClientError(
+                    {"Error": {"Code": "ValidationException"}}, "DeleteMicrovmImage"
+                )
             current["deleted"] = True
 
         client.get_microvm_image.side_effect = image
@@ -52,7 +58,9 @@ class ImageCleanupTests(unittest.TestCase):
         return client
 
     def test_teardown_waits_for_parent_and_version_builds_before_delete(self):
-        client = self.client(["CREATING", "CREATED", "CREATED"], ["IN_PROGRESS", "SUCCESSFUL"])
+        client = self.client(
+            ["CREATING", "CREATED", "CREATED"], ["IN_PROGRESS", "SUCCESSFUL"]
+        )
         session = Mock()
         session.client.return_value = client
         with patch.object(build_image.time, "sleep"):
@@ -62,7 +70,8 @@ class ImageCleanupTests(unittest.TestCase):
     def test_deletion_wait_retries_transient_dns_failure(self):
         client = Mock()
         client.get_microvm_image.side_effect = [
-            EndpointConnectionError(endpoint_url="https://test.invalid"), {"state": "DELETED"},
+            EndpointConnectionError(endpoint_url="https://test.invalid"),
+            {"state": "DELETED"},
         ]
         with patch.object(build_image.time, "sleep"):
             build_image.wait_for_deletion(client, IMAGE_ARN)
@@ -73,9 +82,11 @@ class ImageCleanupTests(unittest.TestCase):
         session = Mock()
         session.client.return_value = client
         clock = Clock()
-        with patch.object(build_image, "BUILD_WAIT_SECONDS", TEST_WAIT_SECONDS), \
-             patch.object(build_image.time, "monotonic", side_effect=lambda: clock.now), \
-             patch.object(build_image.time, "sleep", side_effect=clock.sleep):
+        with (
+            patch.object(build_image, "BUILD_WAIT_SECONDS", TEST_WAIT_SECONDS),
+            patch.object(build_image.time, "monotonic", side_effect=lambda: clock.now),
+            patch.object(build_image.time, "sleep", side_effect=clock.sleep),
+        ):
             with self.assertRaises(CloudboxError):
                 teardown.remove_compute(session, NAMES, CONFIG)
         self.assertEqual(clock.now, TEST_WAIT_SECONDS)
@@ -83,11 +94,15 @@ class ImageCleanupTests(unittest.TestCase):
 
     def test_transient_read_failures_stop_at_deadline_without_delete(self):
         client = Mock()
-        client.get_microvm_image.side_effect = EndpointConnectionError(endpoint_url="https://test.invalid")
+        client.get_microvm_image.side_effect = EndpointConnectionError(
+            endpoint_url="https://test.invalid"
+        )
         clock = Clock()
-        with patch.object(build_image, "BUILD_WAIT_SECONDS", TEST_WAIT_SECONDS), \
-             patch.object(build_image.time, "monotonic", side_effect=lambda: clock.now), \
-             patch.object(build_image.time, "sleep", side_effect=clock.sleep):
+        with (
+            patch.object(build_image, "BUILD_WAIT_SECONDS", TEST_WAIT_SECONDS),
+            patch.object(build_image.time, "monotonic", side_effect=lambda: clock.now),
+            patch.object(build_image.time, "sleep", side_effect=clock.sleep),
+        ):
             with self.assertRaises(CloudboxError) as raised:
                 build_image.wait_until_deletable(client, IMAGE_ARN, wait=True)
         self.assertEqual(raised.exception.code, "image_check_unavailable")
@@ -99,12 +114,28 @@ class ImageCleanupTests(unittest.TestCase):
         for entrypoint in ("teardown", "image_command"):
             with self.subTest(entrypoint=entrypoint):
                 read_client, write_client, session = Mock(), Mock(), Mock()
-                read_client.get_microvm_image.return_value = {"state": "CREATED", "tags": TAGS}
-                read_client.list_microvm_image_versions.return_value = {"items": [{"state": "SUCCESSFUL"}]}
+                read_client.get_microvm_image.return_value = {
+                    "state": "CREATED",
+                    "tags": TAGS,
+                }
+                read_client.list_microvm_image_versions.return_value = {
+                    "items": [{"state": "SUCCESSFUL"}]
+                }
                 read_client.list_microvms.return_value = {"items": []}
 
-                def client(service, *, config):
-                    return write_client if config.retries.get("total_max_attempts") == 1 else read_client
+                # Bind each case's clients before installing the callback.
+                def client(
+                    service,
+                    *,
+                    config,
+                    read_client=read_client,
+                    write_client=write_client,
+                ):
+                    return (
+                        write_client
+                        if config.retries.get("total_max_attempts") == 1
+                        else read_client
+                    )
 
                 session.client.side_effect = client
                 if entrypoint == "teardown":
@@ -112,14 +143,32 @@ class ImageCleanupTests(unittest.TestCase):
                         teardown.remove_compute(session, NAMES, CONFIG)
                 else:
                     deployment = {"image_name": IMAGE_NAME, "image_arn": IMAGE_ARN}
-                    with patch.object(build_image, "load_deployment", return_value=deployment), \
-                         patch.object(build_image, "operator_session", return_value=session), \
-                         patch.object(build_image, "emit"), \
-                         patch.object(build_image, "wait_for_deletion") as wait:
-                        self.assertEqual(build_image.main([
-                            "--env", "test", "delete", "--confirm-name", IMAGE_NAME, "--wait",
-                        ]), 0)
-                write_client.delete_microvm_image.assert_called_once_with(imageIdentifier=IMAGE_ARN)
+                    with (
+                        patch.object(
+                            build_image, "load_deployment", return_value=deployment
+                        ),
+                        patch.object(
+                            build_image, "operator_session", return_value=session
+                        ),
+                        patch.object(build_image, "emit"),
+                        patch.object(build_image, "wait_for_deletion") as wait,
+                    ):
+                        self.assertEqual(
+                            build_image.main(
+                                [
+                                    "--env",
+                                    "test",
+                                    "delete",
+                                    "--confirm-name",
+                                    IMAGE_NAME,
+                                    "--wait",
+                                ]
+                            ),
+                            0,
+                        )
+                write_client.delete_microvm_image.assert_called_once_with(
+                    imageIdentifier=IMAGE_ARN
+                )
                 read_client.delete_microvm_image.assert_not_called()
                 wait.assert_called_once_with(read_client, IMAGE_ARN)
 

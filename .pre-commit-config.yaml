@@ -1,0 +1,76 @@
+# Run these checks only immediately before a commit.
+minimum_pre_commit_version: "4.6.2"
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.13.1-1
+    hooks:
+      - id: shfmt
+        args: [--write, --indent, "2", --case-indent]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.15.1
+    hooks:
+      - id: hadolint
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks-system
+        # Scan the supplied files for both staged and all-files runs.
+        entry: python3 scripts/check_secrets.py
+        pass_filenames: true
+        require_serial: true
+        types: [file]
+        exclude_types: [symlink]
+
+  - repo: local
+    hooks:
+      - id: prettier
+        name: Format Markdown, JSON, YAML, and JavaScript
+        language: node
+        additional_dependencies: [prettier@3.9.6]
+        entry: prettier --write
+        types_or: [markdown, json, yaml, javascript]
+
+      - id: terraform-fmt
+        name: Format Terraform
+        language: system
+        entry: terraform fmt
+        files: \.tf(vars)?$
+
+      - id: tflint
+        name: Lint Terraform
+        language: system
+        # Check all modules, including after a Terraform file is deleted.
+        entry: >-
+          bash -c 'exec tflint --chdir=infra --recursive
+          --config="$PWD/.tflint.hcl" --format=compact'
+        pass_filenames: false
+        always_run: true

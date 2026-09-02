@@ -173,8 +173,7 @@ def main(argv=None):
         result = report.get("result")
         if not isinstance(result, dict) or "answer" not in result:
             raise CloudboxError(
-                "invalid_answer",
-                "The finish report must contain result.answer.",
+                "invalid_answer", "The finish report must contain result.answer."
             )
         if type(result["answer"]) is not int or result["answer"] != EXPECTED_ANSWER:
             raise CloudboxError(

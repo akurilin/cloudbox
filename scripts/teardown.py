@@ -37,7 +37,11 @@ from cloudbox.resources import (
     saved_resources,
     state_remains,
 )
-from scripts.build_image import delete_image_once, wait_for_deletion, wait_until_deletable
+from scripts.build_image import (
+    delete_image_once,
+    wait_for_deletion,
+    wait_until_deletable,
+)
 
 VM_STOPPING = "TERMINATING"
 POLL_SECONDS = 5

@@ -17,6 +17,13 @@ and worker image as needed. Do not reset or tear it down after each change.
 Stop completed job VMs; remove the environment when requested or when testing
 the full setup/teardown lifecycle.
 
+## Before a commit
+
+Run `uv run pre-commit run --all-files` only immediately before a commit.
+Do not run the suite, linters, or formatters during routine edits or reviews.
+If a hook changes files, review and stage the changes, then rerun before committing.
+Use focused tests during implementation when behavior changes.
+
 ## Full cloud infra + basic task test
 
 Run `scripts/e2e_cloud.py` (infrastructure and math) manually, only on user request.

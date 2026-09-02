@@ -34,8 +34,13 @@ from cloudbox.common import (
 from cloudbox.environments import add_environment_argument, get_environment
 from cloudbox.github import MAX_TOKEN_REPOSITORIES
 from scripts.build_image import ensure_image
+from scripts.set_github_secret import (
+    GITHUB_SECRET_SUFFIX,
+    private_key_from_file,
+    secret_has_value,
+    store_private_key,
+)
 from scripts.set_secret import key_from_file
-from scripts.set_github_secret import GITHUB_SECRET_SUFFIX, private_key_from_file, secret_has_value, store_private_key
 
 REQUIRED_TOOLS = ("terraform", "aws")
 INPUT_FIELDS = {
@@ -147,9 +152,7 @@ def read_config(environment):
                 "invalid_config",
                 f"Set 1 to {MAX_TOKEN_REPOSITORIES} allowed GitHub repository IDs.",
             )
-        if any(
-            type(value) is not int or value <= 0 for value in [*ids, *repositories]
-        ):
+        if any(type(value) is not int or value <= 0 for value in [*ids, *repositories]):
             raise CloudboxError(
                 "invalid_config", "GitHub IDs must be positive integers."
             )
@@ -395,8 +398,15 @@ def main(argv=None):
         validate_key(secret)
         github_enabled = "github_app_id" in config
         if arguments.github_key_file and not github_enabled:
-            raise CloudboxError("github_not_configured", "Set all three GitHub fields before loading the key.")
-        github_secret = private_key_from_file(arguments.github_key_file) if arguments.github_key_file else None
+            raise CloudboxError(
+                "github_not_configured",
+                "Set all three GitHub fields before loading the key.",
+            )
+        github_secret = (
+            private_key_from_file(arguments.github_key_file)
+            if arguments.github_key_file
+            else None
+        )
         admin = operator_session(config, provisioner=False)
         from cloudbox.resources import check_resources
 
@@ -413,10 +423,9 @@ def main(argv=None):
             )
         if github_enabled and github_secret is None:
             secret_name = f"{config['project_name']}/{GITHUB_SECRET_SUFFIX}"
-            if (
-                inventory["secrets"].get(secret_name) != "active"
-                or not secret_has_value(admin, secret_name)
-            ):
+            if inventory["secrets"].get(
+                secret_name
+            ) != "active" or not secret_has_value(admin, secret_name):
                 raise CloudboxError(
                     "github_key_required",
                     "Supply --github-key-file for first GitHub setup.",

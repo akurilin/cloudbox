@@ -20,6 +20,7 @@ from botocore.exceptions import (
     EndpointConnectionError,
     ReadTimeoutError,
 )
+
 from cloudbox.common import (
     MICROVM_SERVICE,
     ROOT,
@@ -55,10 +56,23 @@ IMAGE_OWNER = "CloudboxImageScript"
 VERSION_COMPLETE = {"SUCCESSFUL", "FAILED", "DELETED", "DELETE_FAILED"}
 VERSION_PENDING = {"PENDING", "IN_PROGRESS"}
 IMAGE_BUILD_PENDING = {"CREATING", "UPDATING"}
-IMAGE_DELETABLE = {"CREATED", "CREATE_FAILED", "UPDATED", "UPDATE_FAILED", "DELETE_FAILED"}
+IMAGE_DELETABLE = {
+    "CREATED",
+    "CREATE_FAILED",
+    "UPDATED",
+    "UPDATE_FAILED",
+    "DELETE_FAILED",
+}
 VERSION_DELETE_PENDING = VERSION_PENDING | {"DELETING"}
-TRANSIENT_IMAGE_READ_ERRORS = (ConnectionClosedError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError)
-DELETE_SDK_CONFIG = SDK_CONFIG.merge(Config(retries={"mode": "standard", "total_max_attempts": 1}))
+TRANSIENT_IMAGE_READ_ERRORS = (
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
+DELETE_SDK_CONFIG = SDK_CONFIG.merge(
+    Config(retries={"mode": "standard", "total_max_attempts": 1})
+)
 IMAGE_MISSING = "ResourceNotFoundException"
 BUILD_SETTING_FIELDS = (
     "baseImageArn",
@@ -275,7 +289,9 @@ def ensure_image(deployment, session=None, *, wait=True):
 
 def delete_image_once(session, image_arn):
     # Delete has no idempotency token; an unknown response must not repeat it.
-    session.client(MICROVM_SERVICE, config=DELETE_SDK_CONFIG).delete_microvm_image(imageIdentifier=image_arn)
+    session.client(MICROVM_SERVICE, config=DELETE_SDK_CONFIG).delete_microvm_image(
+        imageIdentifier=image_arn
+    )
 
 
 def wait_until_deletable(client, image_arn, *, wait):
@@ -290,15 +306,26 @@ def wait_until_deletable(client, image_arn, *, wait):
             busy = image.get("state") in IMAGE_BUILD_PENDING
             if not busy:
                 if image.get("state") not in IMAGE_DELETABLE:
-                    raise CloudboxError("image_state_unknown", "Inspect the image state before deletion.", image_arn=image_arn)
+                    raise CloudboxError(
+                        "image_state_unknown",
+                        "Inspect the image state before deletion.",
+                        image_arn=image_arn,
+                    )
                 request = {"imageIdentifier": image_arn}
                 while True:
                     page = client.list_microvm_image_versions(**request)
-                    busy = any(item.get("state") in VERSION_DELETE_PENDING for item in page.get("items", []))
+                    busy = any(
+                        item.get("state") in VERSION_DELETE_PENDING
+                        for item in page.get("items", [])
+                    )
                     if busy or not page.get("nextToken"):
                         break
                     if time.monotonic() >= deadline:
-                        raise CloudboxError("image_check_unavailable", "The image check timed out; inspect it before retrying.", image_arn=image_arn)
+                        raise CloudboxError(
+                            "image_check_unavailable",
+                            "The image check timed out; inspect it before retrying.",
+                            image_arn=image_arn,
+                        )
                     request["nextToken"] = page["nextToken"]
                 if not busy:
                     return image
@@ -308,7 +335,11 @@ def wait_until_deletable(client, image_arn, *, wait):
         remaining = deadline - time.monotonic()
         if not wait or remaining <= 0:
             code = "image_check_unavailable" if unavailable else "image_busy"
-            raise CloudboxError(code, "The image is not ready for deletion; inspect it before retrying.", image_arn=image_arn)
+            raise CloudboxError(
+                code,
+                "The image is not ready for deletion; inspect it before retrying.",
+                image_arn=image_arn,
+            )
         time.sleep(min(POLL_SECONDS, remaining))
 
 

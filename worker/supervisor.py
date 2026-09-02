@@ -17,7 +17,11 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from github_access import (
-    child_environment, github_contract, github_environment, revoke_token, validate_github_spec,
+    child_environment,
+    github_contract,
+    github_environment,
+    revoke_token,
+    validate_github_spec,
 )
 
 SCHEMA_VERSION = 3
@@ -45,31 +49,56 @@ MAX_SECRET_FIELD_CHARACTERS = 128
 REDACTED = "[redacted]"
 OMITTED = "[omitted]"
 TRUNCATED = "[truncated]"
-HIDDEN_TRACE_TYPES = {"thinking", "reasoning", "redacted_thinking", "image", "audio", "video", "binary"}
+HIDDEN_TRACE_TYPES = {
+    "thinking",
+    "reasoning",
+    "redacted_thinking",
+    "image",
+    "audio",
+    "video",
+    "binary",
+}
 HIDDEN_TRACE_FIELDS = {
-    "thinking", "reasoning", "reasoningdetails", "thinkingsignature", "textsignature", "signature",
-    "encryptedcontent", "image", "audio", "video", "binary",
+    "thinking",
+    "reasoning",
+    "reasoningdetails",
+    "thinkingsignature",
+    "textsignature",
+    "signature",
+    "encryptedcontent",
+    "image",
+    "audio",
+    "video",
+    "binary",
 }
 SECRET_FIELD_PATTERN = re.compile(
     r"password|passwd|secret|credential|authorization|apikey|accesskey|sessiontoken|refreshtoken|"
     r"accesstoken|ghtoken|githubtoken|privatekey|amzsignature|^token$",
 )
 SECRET_VALUE_PATTERNS = (
-    re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----.*?(?:-----END (?:[A-Z]+ )?PRIVATE KEY-----|$)", re.DOTALL),
-    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{16,})\b"),
+    re.compile(
+        r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----.*?(?:-----END (?:[A-Z]+ )?PRIVATE KEY-----|$)",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{16,})\b"
+    ),
     re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
     re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9_./+=-]+", re.IGNORECASE),
 )
 SECRET_ASSIGNMENT_PATTERN = re.compile(
-    rf'''(?<![A-Za-z0-9_.-])(?P<key>["']?[A-Za-z0-9_.-]{{0,{MAX_SECRET_FIELD_CHARACTERS}}}'''
-    r'''(?:password|passwd|secret|credential|authorization|api[_.-]?key|access[_.-]?key|token|'''
-    rf'''private[_.-]?key|amz[_.-]?signature)[A-Za-z0-9_.-]{{0,{MAX_SECRET_FIELD_CHARACTERS}}}["']?)\s*[:=]\s*'''
-    r'''(?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]\[{"'&]+)''',
+    rf"""(?<![A-Za-z0-9_.-])(?P<key>["']?[A-Za-z0-9_.-]{{0,{MAX_SECRET_FIELD_CHARACTERS}}}"""
+    r"""(?:password|passwd|secret|credential|authorization|api[_.-]?key|access[_.-]?key|token|"""
+    rf"""private[_.-]?key|amz[_.-]?signature)[A-Za-z0-9_.-]{{0,{MAX_SECRET_FIELD_CHARACTERS}}}["']?)\s*[:=]\s*"""
+    r"""(?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]\[{"'&]+)""",
     re.IGNORECASE,
 )
 URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/\s:@]+:[^@\s/]+@", re.IGNORECASE)
-REASONING_TAG_PATTERN = re.compile(r"<(?:think|thinking|reasoning)>.*?(?:</(?:think|thinking|reasoning)>|$)", re.DOTALL | re.IGNORECASE)
+REASONING_TAG_PATTERN = re.compile(
+    r"<(?:think|thinking|reasoning)>.*?(?:</(?:think|thinking|reasoning)>|$)",
+    re.DOTALL | re.IGNORECASE,
+)
 PROVIDER = "openrouter"
 APPLICATION_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = Path("/tmp/cloudbox")
@@ -94,10 +123,15 @@ def utc_now():
 
 def validate_report(report):
     # Recheck the tool result before storage; logs use a separate, truncated copy.
-    if (not isinstance(report, dict) or report.keys() - REPORT_FIELDS
-            or not isinstance(report.get("status"), str) or report["status"] not in REPORT_STATUSES
-            or not isinstance(report.get("summary"), str) or not report["summary"].strip()
-            or ("result" in report and not isinstance(report["result"], dict))):
+    if (
+        not isinstance(report, dict)
+        or report.keys() - REPORT_FIELDS
+        or not isinstance(report.get("status"), str)
+        or report["status"] not in REPORT_STATUSES
+        or not isinstance(report.get("summary"), str)
+        or not report["summary"].strip()
+        or ("result" in report and not isinstance(report["result"], dict))
+    ):
         raise ValueError("invalid_finish_report")
     pending = [(report, 0)]
     try:
@@ -119,7 +153,9 @@ def validate_report(report):
                 continue
             elif not isinstance(value, float) or not math.isfinite(value):
                 raise ValueError("invalid_json_value")
-        encoded = json.dumps(report, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        encoded = json.dumps(
+            report, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        )
         if len(encoded.encode("utf-8")) > MAX_REPORT_BYTES:
             raise ValueError("finish_report_too_large")
         return json.loads(encoded)
@@ -188,9 +224,15 @@ class ActivityFilter:
         variants = set()
         for value in secrets:
             if isinstance(value, str) and value:
-                variants.update((value, quote(value, safe=""), json.dumps(value)[1:-1],
-                                 base64.b64encode(value.encode()).decode(),
-                                 base64.urlsafe_b64encode(value.encode()).decode()))
+                variants.update(
+                    (
+                        value,
+                        quote(value, safe=""),
+                        json.dumps(value)[1:-1],
+                        base64.b64encode(value.encode()).decode(),
+                        base64.urlsafe_b64encode(value.encode()).decode(),
+                    )
+                )
         self.secrets = sorted(variants, key=len, reverse=True)
         self.truncated = False
         self.nodes_left = MAX_TRACE_NODES
@@ -206,14 +248,19 @@ class ActivityFilter:
 
         def redact_assignment(match):
             if secret_field(match.group("key")):
-                return match.group()[:match.start("value") - match.start()] + REDACTED
+                return match.group()[: match.start("value") - match.start()] + REDACTED
             return match.group()
 
         value = SECRET_ASSIGNMENT_PATTERN.sub(redact_assignment, value)
         raw = value.encode("utf-8", errors="replace")
         if len(raw) > MAX_TRACE_TEXT_BYTES:
             self.truncated = True
-            return raw[:MAX_TRACE_TEXT_BYTES - len(TRUNCATED)].decode("utf-8", errors="ignore") + TRUNCATED
+            return (
+                raw[: MAX_TRACE_TEXT_BYTES - len(TRUNCATED)].decode(
+                    "utf-8", errors="ignore"
+                )
+                + TRUNCATED
+            )
         return value
 
     def value(self, value, depth=0):
@@ -226,7 +273,10 @@ class ActivityFilter:
         if value is None or isinstance(value, bool) or number(value):
             return value
         if isinstance(value, dict):
-            if isinstance(value.get("type"), str) and value["type"] in HIDDEN_TRACE_TYPES:
+            if (
+                isinstance(value.get("type"), str)
+                and value["type"] in HIDDEN_TRACE_TYPES
+            ):
                 return OMITTED
             result = {}
             for index, (key, item) in enumerate(value.items()):
@@ -236,7 +286,9 @@ class ActivityFilter:
                     break
                 if not isinstance(key, str) or field_name(key) in HIDDEN_TRACE_FIELDS:
                     continue
-                result[self.text(key)] = REDACTED if secret_field(key) else self.value(item, depth + 1)
+                result[self.text(key)] = (
+                    REDACTED if secret_field(key) else self.value(item, depth + 1)
+                )
             return result
         if isinstance(value, (list, tuple)):
             result = []
@@ -263,10 +315,13 @@ class ActivityFilter:
             # Escaped Unicode and many short fields can exceed the per-value cap.
             preview = encoded[:MAX_TRACE_TEXT_BYTES]
             while True:
-                fallback = {"trace_preview": preview + TRUNCATED, "trace_truncated": True}
+                fallback = {
+                    "trace_preview": preview + TRUNCATED,
+                    "trace_truncated": True,
+                }
                 if len(json.dumps(fallback).encode()) <= MAX_TRACE_METADATA_BYTES:
                     return fallback
-                preview = preview[:len(preview) // 2]
+                preview = preview[: len(preview) // 2]
         except (ValueError, TypeError, RecursionError, UnicodeError):
             return {"trace_unavailable": True}
 
@@ -274,8 +329,13 @@ class ActivityFilter:
 def visible_content(value):
     if not isinstance(value, list):
         return []
-    return [{"type": "text", "text": item["text"]} for item in value
-            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)]
+    return [
+        {"type": "text", "text": item["text"]}
+        for item in value
+        if isinstance(item, dict)
+        and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
+    ]
 
 
 def visible_result(value):
@@ -333,7 +393,9 @@ class PiEvents:
             cost = usage.get("cost", {}).get("total")
             if number(cost):
                 self.usage["estimated_cost_usd"] += cost
-            text = "".join(item["text"] for item in visible_content(message.get("content")))
+            text = "".join(
+                item["text"] for item in visible_content(message.get("content"))
+            )
             metadata = {
                 "stop_reason": message.get("stopReason"),
                 "usage": selected_usage,
@@ -363,11 +425,19 @@ class PiEvents:
                     result = event.get("result", {})
                     matched = tool_id in self.finish_started
                     self.finish_started.discard(tool_id)
-                    if (matched and started is not None and not self.tools_started and self.report is None
-                            and event.get("isError") is False and isinstance(result, dict)
-                            and result.get("terminate") is True):
+                    if (
+                        matched
+                        and started is not None
+                        and not self.tools_started
+                        and self.report is None
+                        and event.get("isError") is False
+                        and isinstance(result, dict)
+                        and result.get("terminate") is True
+                    ):
                         try:
-                            self.report = validate_report(result.get("details", {}).get("report"))
+                            self.report = validate_report(
+                                result.get("details", {}).get("report")
+                            )
                         except (ValueError, AttributeError):
                             metadata["outcome"] = "invalid_finish_report"
             self.trace(event_type, **metadata)
@@ -383,7 +453,10 @@ class PiEvents:
             self.trace(event_type, **metadata)
 
     def completion(self):
-        if self.final_message and self.final_message.get("stopReason") in MODEL_ERROR_STOPS:
+        if (
+            self.final_message
+            and self.final_message.get("stopReason") in MODEL_ERROR_STOPS
+        ):
             return "failed", "agent_terminal_error"
         if self.report is None:
             return "failed", "missing_finish"
@@ -435,7 +508,15 @@ def run_script(name, workspace, deadline, run_id):
         stop_process(process)
 
 
-def run_pi(spec, key, workspace, deadline, run_id, access_environment=None, redaction_secrets=()):
+def run_pi(
+    spec,
+    key,
+    workspace,
+    deadline,
+    run_id,
+    access_environment=None,
+    redaction_secrets=(),
+):
     environment = child_environment()
     environment.update(
         {
@@ -631,8 +712,14 @@ def supervise(microvm_id, payload):
         if events is not None and events.report is not None:
             result["report"] = events.report
         if payload.get("github_token"):
-            result["github_token_revoked"] = revoke_token(payload["github_token"], deadline - STOP_GRACE_SECONDS)
-            emit(run_id, "github_token_revocation", confirmed=result["github_token_revoked"])
+            result["github_token_revoked"] = revoke_token(
+                payload["github_token"], deadline - STOP_GRACE_SECONDS
+            )
+            emit(
+                run_id,
+                "github_token_revocation",
+                confirmed=result["github_token_revoked"],
+            )
         try:
             if workspace.exists():
                 run_script(

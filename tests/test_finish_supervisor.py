@@ -9,25 +9,55 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from botocore.exceptions import ClientError
+
 from cloudbox.cli import Runs
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker"))
 sys.path.insert(0, str(ROOT / "cloudbox"))
 
-import supervisor
+# Load the worker after adding its runtime import paths.
+import supervisor  # noqa: E402
 
 RUN_ID = "45e3a9d8-f176-4f28-bd66-622bcd744272"
-REPORT = {"status": "completed", "summary": "Calculation checked.", "result": {"answer": 42}}
+REPORT = {
+    "status": "completed",
+    "summary": "Calculation checked.",
+    "result": {"answer": 42},
+}
 
 
-def finish(events, report=REPORT, *, is_error=False, tool_id="finish-1", start=True, terminate=True):
+def finish(
+    events,
+    report=REPORT,
+    *,
+    is_error=False,
+    tool_id="finish-1",
+    start=True,
+    terminate=True,
+):
     if start:
-        events.accept({"type": "tool_execution_start", "toolName": "finish",
-                       "toolCallId": tool_id, "args": report})
-    events.accept({"type": "tool_execution_end", "toolName": "finish", "toolCallId": tool_id,
-                   "isError": is_error, "result": {"content": [], "details": {"report": report},
-                                                   "terminate": terminate}})
+        events.accept(
+            {
+                "type": "tool_execution_start",
+                "toolName": "finish",
+                "toolCallId": tool_id,
+                "args": report,
+            }
+        )
+    events.accept(
+        {
+            "type": "tool_execution_end",
+            "toolName": "finish",
+            "toolCallId": tool_id,
+            "isError": is_error,
+            "result": {
+                "content": [],
+                "details": {"report": report},
+                "terminate": terminate,
+            },
+        }
+    )
 
 
 class FinishEventsTests(unittest.TestCase):
@@ -38,9 +68,16 @@ class FinishEventsTests(unittest.TestCase):
         self.addCleanup(self.logger.stop)
 
     def test_old_json_reply_cannot_complete_a_new_run(self):
-        self.events.accept({"type": "message_end", "message": {
-            "role": "assistant", "stopReason": "stop",
-            "content": [{"type": "text", "text": '{"status":"completed"}'}]}})
+        self.events.accept(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "stop",
+                    "content": [{"type": "text", "text": '{"status":"completed"}'}],
+                },
+            }
+        )
         self.assertEqual(("failed", "missing_finish"), self.events.completion())
 
     def test_failed_or_unmatched_finish_does_not_complete(self):
@@ -52,8 +89,14 @@ class FinishEventsTests(unittest.TestCase):
                 self.assertIsNone(events.report)
 
     def test_finish_cannot_complete_with_an_unfinished_tool(self):
-        self.events.accept({"type": "tool_execution_start", "toolName": "bash",
-                            "toolCallId": "push", "args": {"command": "git push"}})
+        self.events.accept(
+            {
+                "type": "tool_execution_start",
+                "toolName": "bash",
+                "toolCallId": "push",
+                "args": {"command": "git push"},
+            }
+        )
         finish(self.events)
         self.assertEqual("failed", self.events.completion()[0])
         self.assertIsNone(self.events.report)
@@ -72,36 +115,66 @@ class FinishEventsTests(unittest.TestCase):
 
 
 class FinishStorageTests(unittest.TestCase):
-    def run_worker(self, *, report=REPORT, exit_code=0, timed_out=False, save_error=None):
+    def run_worker(
+        self, *, report=REPORT, exit_code=0, timed_out=False, save_error=None
+    ):
         events = supervisor.PiEvents(RUN_ID)
         with patch.object(supervisor, "emit"):
             finish(events, report)
-        spec = {"schema_version": 3, "prompt": "Calculate a value.", "model": "test/model",
-                "timeout_seconds": 600, "image_arn": "image", "image_version": "1.0"}
-        payload = {"schema_version": 3, "run_id": RUN_ID, "bucket_name": "bucket",
-                   "aws_region": "us-east-1", "log_group_name": "logs", "openrouter_secret_arn": "secret",
-                   "data_credentials": {"AccessKeyId": "access", "SecretAccessKey": "secret", "SessionToken": "token"}}
+        spec = {
+            "schema_version": 3,
+            "prompt": "Calculate a value.",
+            "model": "test/model",
+            "timeout_seconds": 600,
+            "image_arn": "image",
+            "image_version": "1.0",
+        }
+        payload = {
+            "schema_version": 3,
+            "run_id": RUN_ID,
+            "bucket_name": "bucket",
+            "aws_region": "us-east-1",
+            "log_group_name": "logs",
+            "openrouter_secret_arn": "secret",
+            "data_credentials": {
+                "AccessKeyId": "access",
+                "SecretAccessKey": "secret",
+                "SessionToken": "token",
+            },
+        }
         s3, runtime = Mock(), Mock()
         s3.get_object.return_value = {"Body": io.BytesIO(json.dumps(spec).encode())}
+
         def save(**arguments):
             if save_error and arguments["Key"].endswith("/result.json"):
                 raise save_error
+
         s3.put_object.side_effect = save
         secret = Mock()
         secret.get_secret_value.return_value = {"SecretString": "model-key"}
         compute = Mock()
         runtime.client.side_effect = lambda name, **kwargs: {
-            "s3": s3, "secretsmanager": secret, "lambda-microvms": compute}[name]
-        with tempfile.TemporaryDirectory() as directory, \
-                patch.object(supervisor, "WORKSPACE_ROOT", Path(directory)), \
-                patch.object(supervisor.boto3, "Session", return_value=runtime), \
-                patch.object(supervisor, "run_script"), \
-                patch.object(supervisor, "run_pi", return_value=(exit_code, timed_out, events)), \
-                patch.object(supervisor, "emit") as logger:
+            "s3": s3,
+            "secretsmanager": secret,
+            "lambda-microvms": compute,
+        }[name]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(supervisor, "WORKSPACE_ROOT", Path(directory)),
+            patch.object(supervisor.boto3, "Session", return_value=runtime),
+            patch.object(supervisor, "run_script"),
+            patch.object(
+                supervisor, "run_pi", return_value=(exit_code, timed_out, events)
+            ),
+            patch.object(supervisor, "emit") as logger,
+        ):
             supervisor.supervise("vm", payload)
         compute.terminate_microvm.assert_called_once_with(microvmIdentifier="vm")
-        reports = [call.kwargs for call in s3.put_object.call_args_list
-                   if call.kwargs["Key"].endswith("/result.json")]
+        reports = [
+            call.kwargs
+            for call in s3.put_object.call_args_list
+            if call.kwargs["Key"].endswith("/result.json")
+        ]
         self.assertEqual(1, len(reports))
         saved = reports[0]
         self.assertEqual(f"runs/{RUN_ID}/result.json", saved["Key"])
@@ -137,13 +210,22 @@ class FinishStorageTests(unittest.TestCase):
             self.assertEqual(body, (destination / "result.json").read_bytes())
 
     def test_blocked_preserves_summary_and_partial_result(self):
-        report = {"status": "blocked", "summary": "Repository access is missing.", "result": {"completed_steps": []}}
+        report = {
+            "status": "blocked",
+            "summary": "Repository access is missing.",
+            "result": {"completed_steps": []},
+        }
         result, _, _ = self.run_worker(report=report)
-        self.assertEqual(("failed", "agent_blocked"), (result["status"], result["reason"]))
+        self.assertEqual(
+            ("failed", "agent_blocked"), (result["status"], result["reason"])
+        )
         self.assertEqual(report, result["report"])
 
     def test_crash_and_timeout_win_over_completed_claim(self):
-        for options, status in (({"exit_code": 1}, "failed"), ({"timed_out": True}, "timed_out")):
+        for options, status in (
+            ({"exit_code": 1}, "failed"),
+            ({"timed_out": True}, "timed_out"),
+        ):
             with self.subTest(options=options):
                 result, _, _ = self.run_worker(**options)
                 self.assertEqual(status, result["status"])

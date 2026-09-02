@@ -1,23 +1,44 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import registerFinish, { FINISH_TOOL_NAME, MAX_REPORT_BYTES, validateReport } from "../worker/finish.mjs";
+import registerFinish, {
+  FINISH_TOOL_NAME,
+  MAX_REPORT_BYTES,
+  validateReport,
+} from "../worker/finish.mjs";
 
 const CALL_ID = "finish-call";
-const REPORT = { status: "completed", summary: "The requested work is complete.", result: { answer: 42 } };
+const REPORT = {
+  status: "completed",
+  summary: "The requested work is complete.",
+  result: { answer: 42 },
+};
 
 function extension() {
   const handlers = new Map();
   let tool;
   registerFinish({
-    on(name, handler) { handlers.set(name, handler); },
-    registerTool(definition) { tool = definition; },
+    on(name, handler) {
+      handlers.set(name, handler);
+    },
+    registerTool(definition) {
+      tool = definition;
+    },
   });
   function message(calls) {
-    handlers.get("message_end")({ message: { role: "assistant", content: calls } });
+    handlers.get("message_end")({
+      message: { role: "assistant", content: calls },
+    });
   }
   function standalone() {
-    message([{ type: "toolCall", name: FINISH_TOOL_NAME, id: CALL_ID, arguments: REPORT }]);
+    message([
+      {
+        type: "toolCall",
+        name: FINISH_TOOL_NAME,
+        id: CALL_ID,
+        arguments: REPORT,
+      },
+    ]);
   }
   return { handlers, tool, message, standalone };
 }
@@ -36,7 +57,11 @@ test("standalone finish returns the full report and native termination", async (
 test("blocked completion preserves its summary and partial JSON result", async () => {
   const { tool, standalone } = extension();
   standalone();
-  const report = { status: "blocked", summary: "Missing repository permission.", result: { partial: [null, false, 3, "partial"] } };
+  const report = {
+    status: "blocked",
+    summary: "Missing repository permission.",
+    result: { partial: [null, false, 3, "partial"] },
+  };
   assert.deepEqual((await tool.execute(CALL_ID, report)).details, { report });
 });
 
@@ -51,11 +76,22 @@ test("finish rejects a stringified result and permits an object retry", async ()
 });
 
 test("report size limit accepts a full report and rejects overflow", () => {
-  const report = { status: "completed", summary: "Done.", result: { text: "" } };
+  const report = {
+    status: "completed",
+    summary: "Done.",
+    result: { text: "" },
+  };
   const overhead = Buffer.byteLength(JSON.stringify(report), "utf8");
   report.result.text = "x".repeat(MAX_REPORT_BYTES - overhead);
-  assert.equal(Buffer.byteLength(JSON.stringify(validateReport(report)), "utf8"), MAX_REPORT_BYTES);
-  assert.throws(() => validateReport({ ...report, result: { text: report.result.text + "x" } }), /1 MiB/);
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(validateReport(report)), "utf8"),
+    MAX_REPORT_BYTES,
+  );
+  assert.throws(
+    () =>
+      validateReport({ ...report, result: { text: report.result.text + "x" } }),
+    /1 MiB/,
+  );
 });
 
 test("finish rejects mixed tool batches so sibling side effects can complete", async () => {

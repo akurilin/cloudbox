@@ -47,8 +47,12 @@ AWS_TERMINATED = "TERMINATED"
 UNKNOWN = "unknown"
 DOWNLOAD_NAMES = ("spec.json", "launch.json", "result.json", "output/result.json")
 REJECTED_LAUNCH_CODES = {
-    "AccessDeniedException", "UnauthorizedException", "ValidationException",
-    "ResourceNotFoundException", "ServiceQuotaExceededException", "TooManyRequestsException",
+    "AccessDeniedException",
+    "UnauthorizedException",
+    "ValidationException",
+    "ResourceNotFoundException",
+    "ServiceQuotaExceededException",
+    "TooManyRequestsException",
 }
 
 
@@ -270,11 +274,10 @@ class Runs:
                     clientToken=identity,
                 )
             except (BotoCoreError, ClientError) as error:
-                rejected = isinstance(error, ParamValidationError) or (
-                    isinstance(error, ClientError)
-                    and error.response.get("ResponseMetadata", {}).get(
-                        "RetryAttempts"
-                    )
+                rejected = (
+                    isinstance(error, ParamValidationError)
+                    or isinstance(error, ClientError)
+                    and error.response.get("ResponseMetadata", {}).get("RetryAttempts")
                     == 0
                     and error.response.get("Error", {}).get("Code")
                     in REJECTED_LAUNCH_CODES
