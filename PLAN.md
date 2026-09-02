@@ -1,6 +1,6 @@
 # Cloudbox plan
 
-Status: clean-account setup test in progress. Last reviewed: 2026-09-02.
+Status: one-command clean setup test passed. Last reviewed: 2026-09-02.
 
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
@@ -8,9 +8,10 @@ and attachment, and three worker boundaries. The separately approved main apply
 created 14 items for storage, logs, the secret, and worker roles. The OpenRouter
 key was loaded into Secrets Manager without Terraform. The approved IAM
 corrections were applied. Image `cloudbox-worker` version `2.0` passed the first
-cloud test. The prior deployment has now been removed for the approved clean
-rebuild test. One-command setup is running. AWS login alone does not authorize
-new deployment changes.
+cloud test. The prior deployment was removed for the approved clean rebuild
+test. The corrected setup command completed from confirmed empty Cloudbox state
+with no manual steps between stages. Image `1.0` is selected; infrastructure is
+deployed and its test VM stopped. AWS login alone does not authorize new changes.
 
 ## Current spike scope
 
@@ -23,7 +24,7 @@ ready for jobs. Internal Terraform stages are acceptable; no manual image build,
 secret upload, or version selection between stages. Keep the separate IAM
 bootstrap because the main root uses its restricted role.
 
-Implement `uv run python scripts/setup.py`: check the Terraform input file, AWS
+Use `uv run python scripts/setup.py`: check the Terraform input file, AWS
 access, and `.env` key; apply bootstrap and main infrastructure; load the key;
 build or reuse the matching image and wait; select its exact successful version;
 run the existing cloud math test. Report ready only after that test passes.
@@ -56,11 +57,29 @@ both states and all IAM targets were confirmed empty. The second one-command
 attempt created all 20 items, loaded the key, and built image `1.0`. Its final
 selection plan stopped on a transient DNS error during a CloudWatch refresh.
 Selection now uses `-refresh=false`: it changes only local outputs using the
-preceding infrastructure state. Repeat the clean test after removing this
-attempt's resources. No agent job ran in either failed setup attempt.
+preceding infrastructure state. This attempt's image, archive, 20 Terraform
+items, and secret were removed. Both states and all 13 AWS absence checks passed
+again. The third clean setup invocation completed with exit code zero and
+`ready: true`. No agent job ran in either failed attempt.
 Local inputs, state files, and the earlier downloaded result remain.
 Do not claim that AWS-managed account resources or retained service history
 are removed.
+
+### Verified clean setup result
+
+- Entry point: `uv run python scripts/setup.py --yes`.
+- Start: no Cloudbox resources; both Terraform states empty.
+- Finish: 20 Terraform items, key loaded outside state, image built and selected,
+  and the existing cloud math check passed. No manual command between stages.
+- Image: `cloudbox-worker:1.0`; Pi `0.84.4`; OpenRouter `z-ai/glm-5.3`.
+- Run: `e32a9407-5b57-44a6-8794-8465491bb9db`.
+- Result: `{"answer": 83908970}`; status `succeeded`; VM `TERMINATED`.
+- CloudWatch events received; no active Cloudbox VMs remain.
+- Local file: `.cloudbox/smoke/e32a9407-5b57-44a6-8794-8465491bb9db/output/result.json`.
+
+Image versions restarted after full image deletion. The earlier `2.0` result
+below describes the removed deployment. The current `1.0` contains the corrected
+worker. Infrastructure remains deployed and can accept new CLI submissions.
 
 ### Cloud execution scope
 
@@ -90,7 +109,7 @@ secret setup, and one cloud smoke test. Terraform validation, Python compilation
 and shell syntax checks passed. The real cloud test passed with
 `uv run python scripts/smoke_cloud.py`.
 
-### Verified cloud result
+### First cloud result, before rebuild
 
 - Run: `c9be3807-0acc-4fac-adfb-8974592e4b57`.
 - Image: `cloudbox-worker:2.0`; Pi `0.84.4`; OpenRouter `z-ai/glm-5.3`.

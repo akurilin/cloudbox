@@ -11,10 +11,11 @@ CLI -> new MicroVM -> Pi -> OpenRouter
              +-> S3 results + CloudWatch metadata -> stop VM
 ```
 
-The one end-to-end test passed on 2026-09-02 with image `2.0` and Pi `0.84.4`.
-It submitted `(12345 * 6789) + 98765`, downloaded `{"answer": 83908970}` after
-termination, and checked the answer. CloudWatch received the run metadata.
-Run ID: `c9be3807-0acc-4fac-adfb-8974592e4b57`.
+The clean setup test passed on 2026-09-02. After removing the prior deployment
+and checking resource absence, one setup command created all infrastructure,
+built and selected image `1.0`, and passed the cloud math check with Pi `0.84.4`.
+It downloaded `{"answer": 83908970}` after VM termination and checked the answer.
+Run ID: `e32a9407-5b57-44a6-8794-8465491bb9db`.
 
 ## Configuration
 
