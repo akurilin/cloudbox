@@ -187,7 +187,11 @@ def apply_stage(directory, plan_path, config, *, outputs_only=False):
     check_local_state(config)
     if json.loads(INPUT_PATH.read_bytes()).get("deployment") != config:
         raise CloudboxError("config_changed", "The input file changed during setup. Run setup again.")
-    terraform(directory, "plan", "-input=false", "-no-color", f"-var-file={INPUT_PATH}", f"-out={plan_path}")
+    plan_arguments = ["plan", "-input=false", "-no-color", f"-var-file={INPUT_PATH}", f"-out={plan_path}"]
+    if outputs_only:
+        # Select the image in local outputs using state from the preceding apply.
+        plan_arguments.append("-refresh=false")
+    terraform(directory, *plan_arguments)
     plan = json.loads(terraform(directory, "show", "-json", str(plan_path), capture=True))
     changes = [item.get("change", {}).get("actions", []) for item in plan.get("resource_changes", [])]
     if any("delete" in actions for actions in changes):

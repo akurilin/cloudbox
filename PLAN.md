@@ -52,8 +52,13 @@ created six bootstrap items, then stopped: AWS rejected AssumeRole before the
 new role was ready. Main infrastructure was not created. A later read-only STS
 check succeeded without any policy change. Setup now retries only this role
 access check for up to 120 seconds. The six bootstrap items were removed again;
-repeat absence checks before the next attempt. Local inputs, state files, and
-the downloaded result remain.
+both states and all IAM targets were confirmed empty. The second one-command
+attempt created all 20 items, loaded the key, and built image `1.0`. Its final
+selection plan stopped on a transient DNS error during a CloudWatch refresh.
+Selection now uses `-refresh=false`: it changes only local outputs using the
+preceding infrastructure state. Repeat the clean test after removing this
+attempt's resources. No agent job ran in either failed setup attempt.
+Local inputs, state files, and the earlier downloaded result remain.
 Do not claim that AWS-managed account resources or retained service history
 are removed.
 
