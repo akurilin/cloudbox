@@ -44,7 +44,10 @@ def source_archive():
 
 
 def version_summary(response):
-    return {key: response.get(key) for key in ("imageArn", "imageVersion", "state", "status")}
+    return {key: response.get(key) for key in (
+        "imageArn", "imageVersion", "state", "status",
+        "latestActiveImageVersion", "latestFailedImageVersion",
+    )}
 
 
 def wait_for_version(client, image_arn, version):
@@ -67,13 +70,15 @@ def main():
         parser.add_argument("--version")
         parser.add_argument("--confirm-name")
         arguments = parser.parse_args()
+        if arguments.action == "status" and arguments.wait and not arguments.version:
+            raise CloudboxError("version_required", "Use --version when waiting for an image build.")
         deployment = load_deployment()
         session = operator_session(deployment)
         client = session.client(MICROVM_SERVICE, config=SDK_CONFIG)
         image_arn = deployment["image_arn"]
         if arguments.action == "status":
             response = client.get_microvm_image(imageIdentifier=image_arn)
-            version = arguments.version or response.get("imageVersion")
+            version = arguments.version
             if version:
                 response = client.get_microvm_image_version(imageIdentifier=image_arn, imageVersion=version)
                 if arguments.wait:
