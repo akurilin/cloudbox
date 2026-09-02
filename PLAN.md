@@ -107,6 +107,23 @@ preview found 20 Terraform items, one image, five S3 objects, and no active VMs.
 An output-only destroy plan also passed without cloud resource changes. The
 new deletion path has not been run. The current deployment is unchanged.
 
+### Deployment environments: planning
+
+Use `prod` and `test`; the user selected `prod`, not `persistent`.
+Proposed layout: one repository, shared Terraform modules, separate environment
+inputs and bootstrap/main states. Environment selection and the full lifecycle
+test wrapper are not implemented. Do not require separate repository checkouts.
+
+Read-only Organizations checks on 2026-09-02 found that account `618170664907`
+is the management account of `o-4vt9cqww4f` and its only account. Recommend two
+new member accounts, `cloudbox-prod` and `cloudbox-test`, with existing IAM
+Identity Center access. AWS recommends keeping workloads out of the management
+account and using temporary credentials through federation.
+See [account guidance](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_best-practices_mgmt-acct.html)
+and [access guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html).
+Account creation, migration, and removal of the current deployment need separate
+approval. Never repoint its existing state at a new account.
+
 ### Cloud execution scope
 
 - Build and run the worker only in AWS. No local simulation or storage adapter.
