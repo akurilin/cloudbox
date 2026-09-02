@@ -1,0 +1,28 @@
+# Keep credentials and deployment state out of source control.
+.env
+.env.*
+!.env.example
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+infra/cloudbox.auto.tfvars.json
+crash.log
+crash.*.log
+
+# Keep generated builds and downloaded run results local.
+.build/
+.cloudbox/
+downloads/
+*.zip
+
+# Ignore Python environments and tool caches, but track lock files.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.DS_Store

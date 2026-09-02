@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cloudbox-spike"
+version = "0.1.0"
+description = "Run a short-lived Pi agent in an AWS Lambda MicroVM."
+requires-python = ">=3.12"
+dependencies = ["boto3==1.43.86"]
+
+[project.scripts]
+cloudbox = "cloudbox.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cloudbox"]
