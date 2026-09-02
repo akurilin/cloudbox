@@ -81,6 +81,25 @@ Image versions restarted after full image deletion. The earlier `2.0` result
 below describes the removed deployment. The current `1.0` contains the corrected
 worker. Infrastructure remains deployed and can accept new CLI submissions.
 
+### Standard teardown
+
+Use `uv run python scripts/teardown.py`; `--plan` makes no AWS changes. One
+confirmation or `--yes` approves stopping VMs, deleting the image and bucket
+contents, and destroying main infrastructure before bootstrap. Check exact
+Terraform-derived targets, account, ownership, and absence. Permit another
+attempt after partial deletion; do not bypass missing state or provisioner access.
+Keep local keys, inputs, state files, and downloaded results.
+
+Normal secret deletion keeps seven-day recovery and reports pending deletion.
+`--force-delete-secret` explicitly removes recovery for a clean rebuild. It also
+works for a scheduled secret after Terraform has finished. Do not claim that
+AWS-managed history or unrelated account resources are removed. See README for
+the command. Adding this command does not authorize another live teardown.
+Python syntax, command help, and the live read-only `--plan` check passed. The
+preview found 20 Terraform items, one image, five S3 objects, and no active VMs.
+An output-only destroy plan also passed without cloud resource changes. The
+new deletion path has not been run. The current deployment is unchanged.
+
 ### Cloud execution scope
 
 - Build and run the worker only in AWS. No local simulation or storage adapter.

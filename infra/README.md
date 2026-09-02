@@ -62,7 +62,8 @@ can read the OpenRouter key and terminate other runs of the same project image.
 Run objects and logs expire after 30 days. The new bucket never enables
 versioning. No VPC, NAT gateway, inbound endpoint access, or private ECR is added.
 
-For approved teardown: stop runs, delete the script-owned image, then remove
-main infrastructure and bootstrap last. The bucket refuses deletion while it
-has objects; deletion of saved data needs a separate decision. Secret deletion
-uses the seven-day recovery window. Never use `force_destroy` for convenience.
+Use `uv run python scripts/teardown.py` for approved deletion; `--plan` previews it.
+See [deletion options](../README.md#delete-the-deployment). The script removes
+VMs, the image, and bucket data before Terraform destroys main and bootstrap.
+Keep `force_destroy` disabled. Secret recovery is seven days unless explicitly
+disabled with `--force-delete-secret`.

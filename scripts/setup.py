@@ -179,7 +179,7 @@ def terraform(directory, *arguments, capture=False):
         stderr=subprocess.PIPE if capture else sys.stderr, timeout=COMMAND_TIMEOUT_SECONDS,
     )
     if result.returncode:
-        raise CloudboxError("terraform_failed", "Terraform stopped. Correct the reported error, then run setup again.")
+        raise CloudboxError("terraform_failed", "Terraform stopped. Correct the reported error, then run this command again.")
     return result.stdout
 
 

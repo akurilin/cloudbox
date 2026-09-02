@@ -79,6 +79,26 @@ Downloaded smoke results stay under `.cloudbox/smoke/<run-id>/`. The worker's
 `output/result.json` is the deliverable. The run's top-level `result.json` is the
 supervisor's status record; it is not the same file.
 
+## Delete the deployment
+
+Keep the deployment's input and state files. Use its SSO profile; stop other
+setup commands and job submissions. Preview with `--plan`, or run:
+
+```sh
+uv run python scripts/teardown.py
+```
+
+After confirmation, this stops VMs, deletes the image and all bucket data, then
+destroys main infrastructure and IAM bootstrap. Cloud logs and results are lost.
+It checks that resources are gone. Local keys, configuration, state files, and
+downloads stay. Other AWS resources and retained service history stay.
+
+The secret normally keeps its seven-day recovery window. For a clean rebuild,
+add `--force-delete-secret` to remove it without recovery; otherwise the same
+secret name cannot be reused until AWS deletes it. Add `--yes` to skip the prompt.
+If interrupted, run the command again with the same inputs and state. Versioned
+buckets or untracked resources require separate review.
+
 ## CLI
 
 Commands return JSON. A command exit code describes the CLI operation, not the
