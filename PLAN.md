@@ -114,15 +114,26 @@ Proposed layout: one repository, shared Terraform modules, separate environment
 inputs and bootstrap/main states. Environment selection and the full lifecycle
 test wrapper are not implemented. Do not require separate repository checkouts.
 
-Read-only Organizations checks on 2026-09-02 found that account `618170664907`
-is the management account of `o-4vt9cqww4f` and its only account. Recommend two
-new member accounts, `cloudbox-prod` and `cloudbox-test`, with existing IAM
-Identity Center access. AWS recommends keeping workloads out of the management
-account and using temporary credentials through federation.
+Initial read-only Organizations checks on 2026-09-02 found that account
+`618170664907` is the management account of `o-4vt9cqww4f`, then its only account.
+The user subsequently created these member accounts; both were verified ACTIVE:
+
+- `prod`: `cloudbox-prod`, account `968438785594`.
+- `test`: `cloudbox-test`, account `783951396681`.
+
+The existing IAM Identity Center instance is in `us-west-1`, using local SSO
+session `my-sso`. Neither new account has a provisioned permission set yet.
+Next: assign the existing SSO user/group `AdministratorAccess` in both accounts
+for bootstrap and teardown, then configure separate local profiles. Worker
+permissions stay restricted. Keep Cloudbox resources in `us-east-1`.
+AWS recommends keeping workloads out of the management account and using
+temporary credentials through federation.
 See [account guidance](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_best-practices_mgmt-acct.html)
 and [access guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html).
-Account creation, migration, and removal of the current deployment need separate
-approval. Never repoint its existing state at a new account.
+No Cloudbox resources were deployed in the new accounts and no access grants
+were changed during verification. Deployment, migration, and removal of the
+current deployment need separate approval. Never repoint its existing state
+at a new account.
 
 ### Cloud execution scope
 
