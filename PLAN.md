@@ -122,9 +122,10 @@ The user subsequently created these member accounts; both were verified ACTIVE:
 - `test`: `cloudbox-test`, account `783951396681`.
 
 The existing IAM Identity Center instance is in `us-west-1`, using local SSO
-session `my-sso`. Neither new account has a provisioned permission set yet.
-Next: assign the existing SSO user/group `AdministratorAccess` in both accounts
-for bootstrap and teardown, then configure separate local profiles. Worker
+session `my-sso`. Read-only checks confirmed that `alex.kurilin` has a direct
+`AdministratorAccess` assignment in both accounts, with the AWS-managed
+`AdministratorAccess` policy. Account login has not been tested.
+Next: configure separate local profiles for bootstrap and teardown. Worker
 permissions stay restricted. Keep Cloudbox resources in `us-east-1`.
 AWS recommends keeping workloads out of the management account and using
 temporary credentials through federation.
