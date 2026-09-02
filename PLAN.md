@@ -1,6 +1,7 @@
 # Cloudbox plan
 
-Status: one-command clean setup test passed. Last reviewed: 2026-09-02.
+Status: setup now prepares infrastructure only; prior clean test passed.
+Last reviewed: 2026-09-02.
 
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
@@ -26,8 +27,10 @@ bootstrap because the main root uses its restricted role.
 
 Use `uv run python scripts/setup.py`: check the Terraform input file, AWS
 access, and `.env` key; apply bootstrap and main infrastructure; load the key;
-build or reuse the matching image and wait; select its exact successful version;
-run the existing cloud math test. Report ready only after that test passes.
+build or reuse the matching image and wait; select its exact successful version.
+Report ready after these stages succeed. Do not submit an agent job or run the
+cloud math test during setup. Run `uv run python scripts/smoke_cloud.py` separately
+when an end-to-end check is wanted; that command incurs AWS and OpenRouter usage.
 Tools, AWS account/SSO configuration, and the two private input files remain
 prerequisites. The entry point must not install tools, create credentials, or
 delete an existing deployment. One confirmation or `--yes` covers its stages.
@@ -37,6 +40,10 @@ input file after build success. Do not create a second configuration cache.
 This replaces Q19's manual selection step, not its exact-version pinning rule.
 Repeated setup should reuse a matching successful image. Interrupted setup must
 not require the user to copy intermediate values between commands.
+
+This replaces the earlier requirement to run the math test within setup. Help,
+syntax, and a static no-job check pass; the revised setup has not been applied.
+The current deployment and saved results are unchanged.
 
 The requested infrastructure test removes only inventoried Cloudbox resources,
 checks their absence, then runs this entry point. Existing S3 data and logs would
@@ -65,7 +72,7 @@ Local inputs, state files, and the earlier downloaded result remain.
 Do not claim that AWS-managed account resources or retained service history
 are removed.
 
-### Verified clean setup result
+### Prior clean setup result, with the math test
 
 - Entry point: `uv run python scripts/setup.py --yes`.
 - Start: no Cloudbox resources; both Terraform states empty.

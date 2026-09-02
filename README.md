@@ -11,11 +11,9 @@ CLI -> new MicroVM -> Pi -> OpenRouter
              +-> S3 results + CloudWatch metadata -> stop VM
 ```
 
-The clean setup test passed on 2026-09-02. After removing the prior deployment
-and checking resource absence, one setup command created all infrastructure,
-built and selected image `1.0`, and passed the cloud math check with Pi `0.84.4`.
-It downloaded `{"answer": 83908970}` after VM termination and checked the answer.
-Run ID: `e32a9407-5b57-44a6-8794-8465491bb9db`.
+The clean-deployment test passed on 2026-09-02 with image `1.0` and Pi `0.84.4`.
+The cloud math check downloaded `{"answer": 83908970}` after VM termination.
+Run ID: `e32a9407-5b57-44a6-8794-8465491bb9db`. Setup and job testing are now separate.
 
 ## Configuration
 
@@ -56,17 +54,19 @@ before writes. It then:
 3. Builds the worker image, or reuses a matching successful version.
 4. Saves that exact version in `deployment.image_version` in the existing input
    file, then applies the output-only change.
-5. Runs the existing cloud math check and reports `ready: true` only after it passes.
+
+Setup reports `ready: true` after infrastructure, secret loading, and image
+selection succeed. It does not submit jobs or call a model. AWS charges apply.
 
 Setup rejects state from another account or region and plans that delete or
 replace resources. Use separate local state for another deployment. It never
 destroys infrastructure. If a stage fails, correct the reported error and run
 setup again. Terraform retains completed resources; matching image builds are
-reused. Each completed setup attempt runs a new cloud check and incurs its costs.
+reused.
 
 See [infra/README.md](infra/README.md) for the separate manual steps. Image commands
 still work separately; only setup selects a successful version automatically.
-To repeat only the cloud check after setup:
+Optional cloud test (starts an agent job; AWS and OpenRouter charges apply):
 
 ```sh
 uv run python scripts/smoke_cloud.py

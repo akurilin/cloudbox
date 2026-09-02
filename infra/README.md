@@ -1,8 +1,8 @@
 # Infrastructure
 
 Use `uv run python scripts/setup.py` from the repository root for end-to-end
-setup. It runs both Terraform stages, secret loading, image build and selection,
-and the cloud math check. The commands below are the separate manual path.
+setup. It runs both Terraform stages, secret loading, image build and selection.
+It does not submit jobs. The commands below are the separate manual path.
 
 One input file: `cloudbox.auto.tfvars.json`. Copy the example and keep the real
 file out of Git. Never put credentials or the OpenRouter key in it.

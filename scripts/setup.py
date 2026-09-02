@@ -1,4 +1,4 @@
-"""Create a job-ready Cloudbox deployment with one approval."""
+"""Prepare Cloudbox infrastructure without submitting jobs."""
 
 import argparse
 from datetime import datetime, timezone
@@ -244,7 +244,7 @@ def wait_for_provisioner(config):
 def main():
     stage = "preflight"
     try:
-        parser = argparse.ArgumentParser(description="Create Cloudbox and run its cloud math check.")
+        parser = argparse.ArgumentParser(description="Prepare Cloudbox infrastructure and image without submitting jobs.")
         parser.add_argument("--yes", action="store_true", help="Approve all setup stages without a prompt.")
         arguments = parser.parse_args()
         for tool in REQUIRED_TOOLS:
@@ -257,8 +257,8 @@ def main():
         validate_key(secret)
         operator_session(config, provisioner=False)
         print(f"Account: {config['aws_account_id']}\nRegion: {config['aws_region']}\n"
-              "Steps: IAM bootstrap; infrastructure; secret; image; image selection; cloud math check.\n"
-              "AWS and model charges apply. Setup never deletes resources.", file=sys.stderr)
+              "Steps: IAM bootstrap; infrastructure; secret; image; image selection.\n"
+              "AWS charges apply. Setup does not submit jobs or delete resources.", file=sys.stderr)
         if not arguments.yes and input("Approve setup? [y/N] ").strip().lower() not in {"y", "yes"}:
             raise CloudboxError("not_approved", "Setup was not approved.")
         with tempfile.TemporaryDirectory(prefix="cloudbox-setup-") as plan_directory:
@@ -290,12 +290,7 @@ def main():
             check_local_state(config)
             select_version(document, original, version)
             apply_stage(MAIN_ROOT, plans / "image-selection.tfplan", config, outputs_only=True)
-        stage = "cloud_math"
-        print("Setup: cloud math check", file=sys.stderr, flush=True)
-        smoke = subprocess.run([sys.executable, str(ROOT / "scripts" / "smoke_cloud.py")], cwd=ROOT,
-                               timeout=COMMAND_TIMEOUT_SECONDS)
-        if smoke.returncode:
-            raise CloudboxError("smoke_failed", "The cloud math check failed. Resources remain for inspection.")
+        # Stop at image selection; the cloud math test is a separate operator action.
         emit({"ok": True, "ready": True, "account_id": config["aws_account_id"],
               "region": config["aws_region"], "image_version": version})
         return 0
