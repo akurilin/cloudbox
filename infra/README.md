@@ -41,6 +41,12 @@ The runtime role has no S3 or AssumeRole grant. The CLI passes a separate data
 session restricted to the run prefix. Chained STS sessions last at most one hour;
 the spike limits runs to 3,300 seconds to leave launch margin.
 
+MicroVM calls do not supply usable `iam:PassedToService` context. The provisioner
+can pass only the exact build/runtime roles, without that condition. AWS also
+requires wildcard resource scope for `lambda:PassNetworkConnector`; this grant
+is limited to the configured region and is not given to workers. The CLI still
+sets `NO_INGRESS` explicitly.
+
 IAM boundaries do not protect the worker from its own agent. The runtime role
 can read the OpenRouter key and terminate other runs of the same project image.
 

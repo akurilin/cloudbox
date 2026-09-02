@@ -60,7 +60,10 @@ def error_record(error):
     if isinstance(error, CloudboxError):
         return {"ok": False, "error": {"code": error.code, "message": str(error)}, **error.details}
     if isinstance(error, ClientError):
-        return {"ok": False, "error": {"code": error.response.get("Error", {}).get("Code", "aws_error")}}
+        return {"ok": False, "error": {
+            "code": error.response.get("Error", {}).get("Code", "aws_error"),
+            "operation": error.operation_name,
+        }}
     return {"ok": False, "error": {"code": type(error).__name__}}
 
 

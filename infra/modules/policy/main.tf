@@ -63,7 +63,6 @@ locals {
   log_group_arn         = "${local.arn_prefix}:logs:${local.config.aws_region}:${local.config.aws_account_id}:log-group:${local.log_group_name}"
   provisioner_role_arn  = "${local.account_arn}:role/${local.config.project_name}-provisioner"
   ingress_connector_arn = "${local.region_arn}:aws:network-connector:aws-network-connector:NO_INGRESS"
-  egress_connector_arn  = "${local.region_arn}:aws:network-connector:aws-network-connector:INTERNET_EGRESS"
   operator_arn_pattern  = "${local.account_arn}:role/aws-reserved/sso.amazonaws.com/*AWSReservedSSO_${local.config.sso_permission_set_name}_*"
   tags                  = { Project = local.config.project_name, ManagedBy = "Terraform" }
   role_names = {
@@ -157,11 +156,11 @@ locals {
         Resource = values(local.role_arns)
       },
       {
-        Sid       = "PassBuildAndRuntimeOnly"
-        Effect    = "Allow"
-        Action    = ["iam:PassRole"]
-        Resource  = [local.role_arns.build, local.role_arns.runtime]
-        Condition = { StringEquals = { "iam:PassedToService" = "lambda.amazonaws.com" } }
+        # MicroVM calls omit PassedToService. Keep the grant on two exact roles.
+        Sid      = "PassBuildAndRuntimeOnly"
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = [local.role_arns.build, local.role_arns.runtime]
       },
       {
         Sid      = "RunDataSessions"
@@ -189,10 +188,12 @@ locals {
         Resource = local.base_image_arn
       },
       {
-        Sid      = "ManagedNetworkOnly"
-        Effect   = "Allow"
-        Action   = ["lambda:PassNetworkConnector"]
-        Resource = [local.ingress_connector_arn, local.egress_connector_arn]
+        # This action has no resource-level scope. Workers never receive it.
+        Sid       = "RegionalNetworkConnectorUse"
+        Effect    = "Allow"
+        Action    = ["lambda:PassNetworkConnector"]
+        Resource  = "*"
+        Condition = { StringEquals = { "aws:RequestedRegion" = local.config.aws_region } }
       }
       ], [for key, arn in local.role_arns : {
         Sid       = "BoundedRole${replace(key, "_", "")}"

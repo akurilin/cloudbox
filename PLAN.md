@@ -4,9 +4,11 @@ Status: cloud-only spike implementation in progress. Last reviewed: 2026-09-02.
 
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
-and attachment, and three worker boundaries. Main infrastructure is not yet
-deployed. Review its Terraform plan before apply. AWS login alone does not
-authorize deployment.
+and attachment, and three worker boundaries. The separately approved main apply
+created 14 items for storage, logs, the secret, and worker roles. The OpenRouter
+key was loaded into Secrets Manager without Terraform. Image creation is blocked
+by IAM; the approved policy correction is now applied and the build is being
+retried. No worker run exists yet. AWS login alone does not authorize deployment.
 
 ## Current spike scope
 
@@ -36,6 +38,14 @@ Anthropic inference integration is part of this spike.
 Implementation files now cover Terraform, the Pi worker, the CLI, image builds,
 secret setup, and one cloud smoke test. Terraform validation, Python compilation,
 and shell syntax checks passed. The real cloud test has not run yet.
+
+Image creation returned `AccessDeniedException`. Read-only checks found two
+MicroVM IAM constraints. A saved bootstrap plan updates only the provisioner
+policy: remove `iam:PassedToService` from the two exact role grants, and use
+region-limited `Resource: "*"` for `lambda:PassNetworkConnector`, which has no
+resource-level scope. The user approved this one-policy update and it was applied.
+Worker policies are unchanged. See the AWS sample and permission reference
+in Sources. The CLI still explicitly uses `NO_INGRESS`.
 
 Design review checkpoint: Q1-Q42 are answered. V1 design choices are settled;
 technical checks remain. Implementation is now approved; deployment review remains.
@@ -282,8 +292,10 @@ profile region. Recheck authenticated identity before approved cloud writes.
 
 Use administrator access only for an approved bootstrap. Create a restricted
 `cloudbox-provisioner` role, then use it for Terraform. Scope access to project
-resources. Restrict `iam:PassRole` to the build and runtime roles and the Lambda
-service. Review a permissions boundary: a name prefix alone does not prevent
+resources. Restrict `iam:PassRole` to the exact build and runtime role ARNs. The
+MicroVM service does not supply usable `iam:PassedToService` context; the approved
+spike correction removes that condition. Role trust still names Lambda. Review
+a permissions boundary: a name prefix alone does not prevent
 IAM privilege escalation. The provisioner must not change its own access or
 the boundary that limits it.
 
@@ -1138,6 +1150,7 @@ Primary documentation; recheck before deployment.
 - [Runtime controls and lifecycle hooks](https://docs.aws.amazon.com/lambda/latest/dg/microvms-launching.html)
 - [Security and roles](https://docs.aws.amazon.com/lambda/latest/dg/microvms-security.html)
 - [IAM action and resource scope](https://docs.aws.amazon.com/service-authorization/latest/reference/list_lambda.html)
+- [AWS sample: MicroVM role-passing constraints](https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend/)
 - [Networking](https://docs.aws.amazon.com/lambda/latest/dg/microvms-networking.html)
 - [Image build process](https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html)
 - [Run payload and idempotency](https://docs.aws.amazon.com/lambda/latest/microvm-api/API_RunMicrovm.html)
