@@ -108,6 +108,16 @@ Cloudbox records the agent's completion report. Review external changes
 independently. No automatic task retry is safe
 after a lost response: a GitHub action may already have completed.
 
+## Local tests
+
+```sh
+uv run python -m unittest discover -s tests
+node --test tests/test_finish.mjs
+```
+
+These tests cover result handling, credentials, and cleanup. Cloud calls are
+simulated. Use the cloud smoke check to verify the deployed agent loop.
+
 ## Full cloud test
 
 ```sh

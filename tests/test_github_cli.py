@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from botocore.exceptions import ClientError, ReadTimeoutError
 
-from cloudbox.cli import MAX_HOOK_PAYLOAD_BYTES, Runs, build_parser, input_spec
+from cloudbox.cli import MAX_HOOK_PAYLOAD_BYTES, Runs
 from cloudbox.common import CloudboxError
 from cloudbox.github import GitHubAccess, RUN_PERMISSIONS
 
@@ -49,36 +49,14 @@ class GitHubCLITests(unittest.TestCase):
     def submit(self):
         return self.runs.submit({"prompt": PROMPT})
 
-    def test_input_remains_a_generic_prompt(self):
-        args = build_parser().parse_args(["--env", "test", "submit", PROMPT])
-        self.assertEqual(input_spec(args), {"prompt": PROMPT})
-
     def test_github_token_only_enters_transient_hook(self):
         self.submit()
         payload = json.loads(self.runs.compute.run_microvm.call_args.kwargs["runHookPayload"])
         records = [json.loads(call.kwargs["Body"]) for call in self.runs.s3.put_object.call_args_list]
-        spec = records[0]
         self.assertEqual(payload["github_token"], TOKEN)
         self.assertEqual(payload["github_token_expires_at"], self.access.expires_at)
-        self.assertEqual(payload["schema_version"], 3)
-        self.assertEqual(spec["schema_version"], 3)
-        self.assertEqual(spec["github"], self.access.github)
-        self.assertEqual(spec["prompt"], PROMPT)
         self.assertNotIn(TOKEN, json.dumps(records))
-        self.assertFalse({"job_type", "issue_url", "validation_command", "branch"} & spec.keys())
-        self.assertNotIn("required_output", spec)
         self.revoke.assert_not_called()
-
-    def test_run_without_github_uses_finish_schema(self):
-        self.prepare_access.return_value = None
-        self.submit()
-        payload = json.loads(self.runs.compute.run_microvm.call_args.kwargs["runHookPayload"])
-        spec = json.loads(self.runs.s3.put_object.call_args_list[0].kwargs["Body"])
-        self.assertEqual(payload["schema_version"], 3)
-        self.assertEqual(spec["schema_version"], 3)
-        self.assertNotIn("github_token", payload)
-        self.assertNotIn("github", spec)
-        self.assertNotIn("required_output", spec)
 
     def test_large_payload_revokes_before_launch(self):
         self.prepare_access.return_value = GitHubAccess(self.access.github, "x" * MAX_HOOK_PAYLOAD_BYTES, self.access.expires_at)
@@ -121,14 +99,12 @@ class GitHubCLITests(unittest.TestCase):
         self.revoke.assert_not_called()
 
     def test_rejection_after_sdk_retry_preserves_token(self):
-        for metadata in ({"RetryAttempts": 1}, {}):
-            with self.subTest(metadata=metadata):
-                self.runs.compute.run_microvm.side_effect = ClientError(
-                    {"Error": {"Code": "AccessDeniedException"}, "ResponseMetadata": metadata}, "RunMicrovm")
-                with self.assertRaises(CloudboxError) as raised:
-                    self.submit()
-                self.assertEqual(raised.exception.code, "launch_unknown")
-                self.revoke.assert_not_called()
+        self.runs.compute.run_microvm.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}, "ResponseMetadata": {"RetryAttempts": 1}}, "RunMicrovm")
+        with self.assertRaises(CloudboxError) as raised:
+            self.submit()
+        self.assertEqual(raised.exception.code, "launch_unknown")
+        self.revoke.assert_not_called()
 
 
 if __name__ == "__main__":

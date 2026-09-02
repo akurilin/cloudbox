@@ -52,14 +52,12 @@ class ImageCleanupTests(unittest.TestCase):
         return client
 
     def test_teardown_waits_for_parent_and_version_builds_before_delete(self):
-        for parents in (["CREATING", "CREATED", "CREATED"], ["CREATED"]):
-            with self.subTest(parents=parents):
-                client = self.client(parents, ["IN_PROGRESS", "SUCCESSFUL"])
-                session = Mock()
-                session.client.return_value = client
-                with patch.object(build_image.time, "sleep"):
-                    teardown.remove_compute(session, NAMES, CONFIG)
-                client.delete_microvm_image.assert_called_once_with(imageIdentifier=IMAGE_ARN)
+        client = self.client(["CREATING", "CREATED", "CREATED"], ["IN_PROGRESS", "SUCCESSFUL"])
+        session = Mock()
+        session.client.return_value = client
+        with patch.object(build_image.time, "sleep"):
+            teardown.remove_compute(session, NAMES, CONFIG)
+        client.delete_microvm_image.assert_called_once_with(imageIdentifier=IMAGE_ARN)
 
     def test_deletion_wait_retries_transient_dns_failure(self):
         client = Mock()
@@ -81,28 +79,6 @@ class ImageCleanupTests(unittest.TestCase):
             with self.assertRaises(CloudboxError):
                 teardown.remove_compute(session, NAMES, CONFIG)
         self.assertEqual(clock.now, TEST_WAIT_SECONDS)
-        client.delete_microvm_image.assert_not_called()
-
-    def test_pending_version_on_later_page_blocks_delete_without_wait(self):
-        client = Mock()
-        client.get_microvm_image.return_value = {"state": "CREATED", "tags": TAGS}
-        client.list_microvm_image_versions.side_effect = [
-            {"items": [{"state": "SUCCESSFUL"}], "nextToken": "next-page"},
-            {"items": [{"state": "IN_PROGRESS"}]},
-        ]
-        with self.assertRaises(CloudboxError) as raised:
-            build_image.wait_until_deletable(client, IMAGE_ARN, wait=False)
-        self.assertEqual(raised.exception.code, "image_busy")
-        self.assertEqual(client.list_microvm_image_versions.call_args.kwargs["nextToken"], "next-page")
-        client.delete_microvm_image.assert_not_called()
-
-    def test_access_denied_does_not_retry_or_delete(self):
-        client = Mock()
-        client.get_microvm_image.side_effect = ClientError({"Error": {"Code": "AccessDeniedException"}}, "GetMicrovmImage")
-        with patch.object(build_image.time, "sleep") as sleep:
-            with self.assertRaises(ClientError):
-                build_image.wait_until_deletable(client, IMAGE_ARN, wait=True)
-        sleep.assert_not_called()
         client.delete_microvm_image.assert_not_called()
 
     def test_transient_read_failures_stop_at_deadline_without_delete(self):
@@ -146,7 +122,6 @@ class ImageCleanupTests(unittest.TestCase):
                 write_client.delete_microvm_image.assert_called_once_with(imageIdentifier=IMAGE_ARN)
                 read_client.delete_microvm_image.assert_not_called()
                 wait.assert_called_once_with(read_client, IMAGE_ARN)
-                self.assertEqual(session.client.call_args_list[0].kwargs["config"].retries["total_max_attempts"], 3)
 
 
 if __name__ == "__main__":

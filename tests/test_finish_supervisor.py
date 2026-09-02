@@ -8,6 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from botocore.exceptions import ClientError
+from cloudbox.cli import Runs
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker"))
 sys.path.insert(0, str(ROOT / "cloudbox"))
@@ -34,17 +37,6 @@ class FinishEventsTests(unittest.TestCase):
         self.logger.start()
         self.addCleanup(self.logger.stop)
 
-    def test_finish_needs_no_final_message_or_output_file(self):
-        finish(self.events)
-        self.assertEqual(("succeeded", "completed"), self.events.completion())
-        self.assertEqual(REPORT, self.events.report)
-
-    def test_prose_does_not_override_an_accepted_report(self):
-        finish(self.events)
-        self.events.accept({"type": "message_end", "message": {
-            "role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "Done."}]}})
-        self.assertEqual(("succeeded", "completed"), self.events.completion())
-
     def test_old_json_reply_cannot_complete_a_new_run(self):
         self.events.accept({"type": "message_end", "message": {
             "role": "assistant", "stopReason": "stop",
@@ -66,60 +58,17 @@ class FinishEventsTests(unittest.TestCase):
         self.assertEqual("failed", self.events.completion()[0])
         self.assertIsNone(self.events.report)
 
-    def test_invalid_report_can_be_corrected(self):
-        finish(self.events, {**REPORT, "summary": " "})
+    def test_stringified_result_can_be_corrected_before_completion(self):
+        # A cloud run returned JSON text; reject it before accepting completion.
+        finish(self.events, {**REPORT, "result": '{"answer":42}'})
         self.assertIsNone(self.events.report)
         finish(self.events, tool_id="finish-2")
         self.assertEqual(REPORT, self.events.report)
 
-    def test_result_requires_an_object_before_completion(self):
-        for value in ('{"answer":42}', None, [42], 42, True):
-            with self.subTest(value=value):
-                events = supervisor.PiEvents(RUN_ID)
-                finish(events, {**REPORT, "result": value})
-                self.assertIsNone(events.report)
-                finish(events, tool_id="finish-2")
-                self.assertEqual(REPORT, events.report)
-
     def test_terminal_model_error_wins_over_report(self):
         finish(self.events)
-        for stop_reason in ("error", "aborted", "length"):
-            with self.subTest(stop_reason=stop_reason):
-                self.events.final_message = {"stopReason": stop_reason}
-                self.assertEqual(("failed", "agent_terminal_error"), self.events.completion())
-
-    def test_report_is_not_truncated_like_its_log(self):
-        report = {**REPORT, "result": {"text": "x" * (supervisor.MAX_TRACE_TEXT_BYTES + 1)}}
-        finish(self.events, report)
-        self.assertEqual(report, self.events.report)
-
-    def test_validate_report_rejects_bad_schema_and_non_json_values(self):
-        bad = [None, [], {}, {**REPORT, "status": "timed_out"}, {**REPORT, "summary": ""},
-               {**REPORT, "summary": 42}, {**REPORT, "extra": True},
-               {**REPORT, "result": {"value": float("nan")}}, {**REPORT, "result": {1: "numeric key"}},
-               {**REPORT, "result": {"tuple": (1, 2)}}]
-        for report in bad:
-            with self.subTest(report=report), self.assertRaises(ValueError):
-                supervisor.validate_report(report)
-
-    def test_result_fields_accept_json_scalars_arrays_and_null(self):
-        for value in (None, False, 1, "text", [1, {"ok": True}]):
-            report = {**REPORT, "result": {"value": value}}
-            with self.subTest(value=value):
-                self.assertEqual(report, supervisor.validate_report(report))
-
-    def test_report_size_uses_utf8(self):
-        report = {**REPORT, "result": {"text": "\u754c" * (supervisor.MAX_REPORT_BYTES // 3)}}
-        with self.assertRaises(ValueError):
-            supervisor.validate_report(report)
-
-    def test_report_rejects_lone_surrogates_and_excess_nesting(self):
-        nested = None
-        for _ in range(supervisor.MAX_REPORT_DEPTH):
-            nested = [nested]
-        for result in ("\ud800", {"\ud800": "value"}, nested):
-            with self.subTest(result_type=type(result).__name__), self.assertRaises(ValueError):
-                supervisor.validate_report({**REPORT, "result": {"value": result}})
+        self.events.final_message = {"stopReason": "error"}
+        self.assertEqual(("failed", "agent_terminal_error"), self.events.completion())
 
 
 class FinishStorageTests(unittest.TestCase):
@@ -157,37 +106,51 @@ class FinishStorageTests(unittest.TestCase):
         saved = reports[0]
         self.assertEqual(f"runs/{RUN_ID}/result.json", saved["Key"])
         self.assertEqual("*", saved["IfNoneMatch"])
-        return json.loads(saved["Body"]), logger
+        return json.loads(saved["Body"]), saved["Body"], logger
 
-    def test_store_one_report_without_an_artifact_file(self):
-        result, _ = self.run_worker()
+    def test_maximum_report_survives_storage_and_download(self):
+        # One report crosses the event, storage, and download size boundaries.
+        report = {**REPORT, "result": {"text": ""}}
+        overhead = len(json.dumps(report, separators=(",", ":")).encode())
+        report["result"]["text"] = "x" * (supervisor.MAX_REPORT_BYTES - overhead)
+        result, body, _ = self.run_worker(report=report)
         self.assertEqual("succeeded", result["status"])
-        self.assertEqual(REPORT, result["report"])
-        self.assertFalse({"artifact_key", "artifact_complete"} & result.keys())
-
-    def test_unicode_report_fits_the_client_record_limit(self):
-        from cloudbox.common import MAX_RECORD_BYTES
-        report = {**REPORT, "result": {"text": "\U0001f9ea" * 200_000}}
-        result, _ = self.run_worker(report=report)
         self.assertEqual(report, result["report"])
-        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
-        self.assertLessEqual(len(encoded), MAX_RECORD_BYTES)
+        self.assertGreater(len(body), supervisor.MAX_REPORT_BYTES)
+
+        runs = Runs.__new__(Runs)
+        runs.bucket = "bucket"
+        runs.s3 = Mock()
+        runs.status = Mock(return_value={"task_status": "succeeded"})
+
+        def get_object(**arguments):
+            if arguments["Key"] == f"runs/{RUN_ID}/result.json":
+                return {"Body": io.BytesIO(body)}
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+        runs.s3.get_object.side_effect = get_object
+        self.assertEqual(result, runs.record(RUN_ID, "result.json"))
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "download"
+            downloaded = runs.download(RUN_ID, destination)
+            self.assertFalse(downloaded["incomplete"])
+            self.assertEqual(body, (destination / "result.json").read_bytes())
 
     def test_blocked_preserves_summary_and_partial_result(self):
         report = {"status": "blocked", "summary": "Repository access is missing.", "result": {"completed_steps": []}}
-        result, _ = self.run_worker(report=report)
+        result, _, _ = self.run_worker(report=report)
         self.assertEqual(("failed", "agent_blocked"), (result["status"], result["reason"]))
         self.assertEqual(report, result["report"])
 
     def test_crash_and_timeout_win_over_completed_claim(self):
         for options, status in (({"exit_code": 1}, "failed"), ({"timed_out": True}, "timed_out")):
             with self.subTest(options=options):
-                result, _ = self.run_worker(**options)
+                result, _, _ = self.run_worker(**options)
                 self.assertEqual(status, result["status"])
                 self.assertEqual(REPORT, result["report"])
 
     def test_failed_save_is_logged_and_vm_still_stops(self):
-        _, logger = self.run_worker(save_error=OSError("storage unavailable"))
+        _, _, logger = self.run_worker(save_error=OSError("storage unavailable"))
         types = [call.args[1] for call in logger.call_args_list]
         self.assertIn("result_upload_error", types)
         self.assertNotIn("result_saved", types)

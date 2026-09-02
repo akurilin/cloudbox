@@ -14,22 +14,25 @@ alone does not authorize new changes.
 
 This section overrides the earlier v1 sequence and test requirements below.
 
-### Test suite review
+### Test scope
 
-Review on 2026-09-02 covered the working tree, including pending finish changes.
-All 93 Python tests and 16 Node tests passed: 109 tests, 11 files, 1,690 lines.
-Python took 2.087 seconds; Node took 0.139 seconds. Default Python discovery
-found zero tests. Use `.venv/bin/python -m unittest discover -s tests` and
-`node --test tests/test_finish.mjs`; neither local command is in README.
+The user approved keeping only core regression tests on 2026-09-02.
+Reduction complete: 111 tests became 45 (39 Python, 6 Node); test code fell
+from 1,715 to 886 lines across eight files. Worker edits and supervisor review
+are complete. Both local suites and the diff whitespace check pass.
 
-Proposal: reduce the suite to core result storage, failure/stop behavior,
-credential scope and cleanup, log redaction, and known image cleanup failures.
-Remove literal schema and prompt wording checks; reduce repeated input matrices
-and rare value cases. Keep the real local Git checks. Most tests check useful
-behavior, but their simulated Pi events do not prove provider integration.
-Use the existing cloud smoke check for that boundary when requested. Keep the
-full infrastructure lifecycle test manual, only on explicit request.
-This review changed no tests or application code and ran no cloud commands.
+Keep tests for core behavior or reproduced failures. Do not add tests solely
+for AWS field forwarding, display formatting, literal schemas, prompt wording,
+or speculative input variants. Removed the infrastructure helper/report and
+smoke orchestration suites, legacy client cases, and repeated input matrices.
+One large-report test now covers supervisor events, storage, reads, and download.
+
+Retained finish correction and failure handling, result storage, credential
+scope and cleanup, real Git setup, log redaction, pre-reset key checks, and
+image cleanup failures. README now gives both local test commands; Python
+discovery requires `-s tests`. Local tests simulate cloud and Pi boundaries.
+Use the cloud smoke check when requested; run the full infrastructure lifecycle
+test only on explicit request. No application code or cloud resources changed.
 
 ### Result reporting
 

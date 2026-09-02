@@ -31,25 +31,6 @@ class ActivityTraceTests(unittest.TestCase):
         lines = stream.getvalue().splitlines()
         return [json.loads(line) for line in lines], lines
 
-    def test_visible_messages_commands_results_and_errors_are_logged(self):
-        records, _ = self.records([
-            {"type": "message_end", "message": {"role": "assistant", "timestamp": 1,
-                "stopReason": "toolUse", "content": [{"type": "text", "text": "I will inspect the failing test."}]}},
-            {"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "bash",
-             "args": {"command": "python -m unittest tests.test_example", "timeout": 20}},
-            {"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "bash", "isError": True,
-             "result": {"content": [{"type": "text", "text": "AssertionError: expected 2"}],
-                        "details": {"fullOutputPath": "/tmp/test-output.txt"}}},
-            {"type": "message_end", "message": {"role": "assistant", "timestamp": 2,
-                "stopReason": "stop", "content": [{"type": "text", "text": '{"status":"completed"}'}]}},
-        ])
-        self.assertEqual("I will inspect the failing test.", records[0]["text"])
-        self.assertEqual("python -m unittest tests.test_example", records[1]["arguments"]["command"])
-        self.assertEqual("error", records[2]["outcome"])
-        self.assertEqual("AssertionError: expected 2", records[2]["result"]["content"][0]["text"])
-        self.assertEqual("/tmp/test-output.txt", records[2]["result"]["details"]["fullOutputPath"])
-        self.assertEqual('{"status":"completed"}', records[3]["text"])
-
     def test_reasoning_signatures_images_and_streaming_deltas_are_omitted(self):
         records, lines = self.records([
             {"type": "message_update", "assistantMessageEvent": {"type": "thinking_delta", "delta": "PRIVATE-DELTA"}},
@@ -82,23 +63,6 @@ class ActivityTraceTests(unittest.TestCase):
             self.assertNotIn(value, "".join(lines))
         self.assertIn("[redacted]", json.dumps(records))
 
-    def test_common_secret_fields_and_patterns_are_redacted(self):
-        secrets = ["unknown-password", "opaque-access-token", "authorization-value",
-                   "sk-or-v1-" + "a" * 40, "ghs_" + "b" * 36, "AKIA" + "C" * 16,
-                   "pem-private-value", "url-password", "signed-url-secret"]
-        _, lines = self.records([{
-            "type": "tool_execution_start", "toolCallId": "call", "toolName": "bash", "args": {
-                "password": secrets[0], "nested": {"access_token": secrets[1]},
-                "command": (f'Authorization: Bearer {secrets[2]}\n'
-                            f'{secrets[3]} {secrets[4]} {secrets[5]}\n'
-                            f'-----BEGIN PRIVATE KEY-----\n{secrets[6]}\n-----END PRIVATE KEY-----\n'
-                            f'https://name:{secrets[7]}@example.test/file\n'
-                            f'https://example.test?X-Amz-Signature={secrets[8]}'),
-            },
-        }])
-        for value in secrets:
-            self.assertNotIn(value, "".join(lines))
-
     def test_redaction_precedes_truncation_and_records_stay_bounded(self):
         # The credential starts before the text limit and ends after it.
         long_secret = "s" * (supervisor.MAX_TRACE_TEXT_BYTES * 2)
@@ -110,46 +74,6 @@ class ActivityTraceTests(unittest.TestCase):
         self.assertLessEqual(len(lines[0].encode()), supervisor.MAX_TRACE_RECORD_BYTES)
         self.assertIn("truncated", lines[0])
         self.assertNotIn("s" * 100, lines[0])
-
-    def test_large_nested_or_unsupported_values_use_safe_fallbacks(self):
-        nested = {"value": "visible"}
-        for _ in range(100):
-            nested = {"next": nested}
-        _, lines = self.records([{
-            "type": "tool_execution_start", "toolCallId": "call", "toolName": "edit",
-            "args": {"deep": nested, "many": ["x"] * 1000, "binary": b"private-binary", "unknown": object()},
-        }])
-        self.assertLessEqual(len(lines[0].encode()), supervisor.MAX_TRACE_RECORD_BYTES)
-        self.assertNotIn("private-binary", lines[0])
-        self.assertNotIn("object at", lines[0])
-        self.assertIn("truncated", lines[0])
-
-    def test_repeated_message_end_does_not_duplicate_text_or_usage(self):
-        message = {"role": "assistant", "timestamp": 1, "stopReason": "stop",
-                   "usage": {"input": 4}, "content": [{"type": "text", "text": "visible"}]}
-        records, _ = self.records([{"type": "message_end", "message": message}] * 2)
-        self.assertEqual(1, len(records))
-        self.assertEqual({"input": 4}, records[0]["usage"])
-
-    def test_model_error_message_is_sanitized_without_provider_payload(self):
-        records, lines = self.records([{"type": "message_end", "message": {
-            "role": "assistant", "stopReason": "error", "content": [],
-            "errorMessage": f"Rate limit for {SECRET}; retry later.",
-            "providerPayload": {"reasoning": "PRIVATE-PROVIDER-DATA"},
-        }}], [SECRET])
-        self.assertEqual("Rate limit for [redacted]; retry later.", records[0]["error_message"])
-        self.assertNotIn("PRIVATE-PROVIDER-DATA", "".join(lines))
-
-    def test_runtime_credential_collection_uses_sdk_and_safe_fallback(self):
-        session = Mock()
-        session.get_credentials.return_value.get_frozen_credentials.return_value = Mock(
-            access_key="runtime-access", secret_key="runtime-secret", token="runtime-session",
-        )
-        data = {"AccessKeyId": "data-access", "SecretAccessKey": "data-secret", "SessionToken": "data-session"}
-        values = supervisor.runtime_trace_secrets(session, data)
-        self.assertEqual(set(data.values()) | {"runtime-access", "runtime-secret", "runtime-session"}, set(values))
-        session.get_credentials.side_effect = RuntimeError("credential error")
-        self.assertEqual(set(data.values()), set(supervisor.runtime_trace_secrets(session, data)))
 
     def test_run_pi_filters_model_github_data_and_container_credentials(self):
         secrets = ("model-value", "github-value", "data-value", "runtime-value", "container-value")

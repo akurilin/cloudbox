@@ -1,7 +1,6 @@
 """Check GitHub credential scope without remote requests."""
 
 import io
-import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -9,16 +8,11 @@ from http.client import IncompleteRead
 from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError, URLError
 
-import jwt
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from cloudbox.common import CloudboxError
-from cloudbox.github import (
-    JWT_CLOCK_MARGIN_SECONDS, JWT_LIFETIME_SECONDS, RUN_PERMISSIONS,
-    TOKEN_CLEANUP_MARGIN_SECONDS, TOKEN_STARTUP_MARGIN_SECONDS,
-    app_jwt, prepare_github_access, token_deadline, validate_private_key,
-)
+from cloudbox.github import RUN_PERMISSIONS, prepare_github_access
 from cloudbox.github_api import GitHubAPIError, GitHubClient, NoRedirects
 
 APP_ID = 123
@@ -54,32 +48,6 @@ class GitHubAuthTests(unittest.TestCase):
             return {"id": BOT_ID, "login": BOT_LOGIN}
         return self.response
 
-    def test_no_settings_do_not_access_aws(self):
-        self.assertIsNone(prepare_github_access(self.session, {}))
-        self.session.client.assert_not_called()
-
-    def test_partial_settings_do_not_create_access(self):
-        for config in ({"github_app_id": APP_ID}, {"github_app_id": 0}):
-            with self.subTest(config=config), self.assertRaisesRegex(CloudboxError, "Configure the GitHub"):
-                prepare_github_access(self.session, config)
-        self.session.client.assert_not_called()
-
-    def test_jwt_verifies_and_uses_bounded_lifetime(self):
-        now = int(datetime.now(timezone.utc).timestamp())
-        with patch("cloudbox.github.time.time", return_value=now):
-            encoded = app_jwt(self.pem, APP_ID)
-        claims = jwt.decode(encoded, self.private_key.public_key(), algorithms=["RS256"])
-        self.assertEqual(claims, {"iat": now - JWT_CLOCK_MARGIN_SECONDS,
-                                 "exp": now + JWT_LIFETIME_SECONDS, "iss": str(APP_ID)})
-
-    def test_rejects_other_key_types(self):
-        key = ec.generate_private_key(ec.SECP256R1())
-        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                serialization.NoEncryption())
-        with self.assertRaises(CloudboxError) as raised:
-            validate_private_key(pem)
-        self.assertEqual(raised.exception.code, "github_private_key_invalid")
-
     @patch("cloudbox.github.revoke_quietly")
     @patch("cloudbox.github.GitHubClient")
     def test_exact_repository_scope_is_available_to_generic_runs(self, client, revoke):
@@ -99,9 +67,7 @@ class GitHubAuthTests(unittest.TestCase):
     def test_unexpected_scope_revokes_token(self, client, revoke):
         cases = [
             {"permissions": {**RUN_PERMISSIONS, "workflows": "write"}},
-            {"repositories": REPOSITORIES[:1]},
             {"repositories": [*REPOSITORIES, {"id": 126, "full_name": "example/extra"}]},
-            {"repositories": [{"id": True, "full_name": "example/first"}, REPOSITORIES[1]]},
         ]
         for change in cases:
             with self.subTest(change=change):
@@ -112,36 +78,6 @@ class GitHubAuthTests(unittest.TestCase):
                     prepare_github_access(self.session, self.deployment)
                 self.assertEqual(raised.exception.code, "github_scope_invalid")
                 revoke.assert_called_with(TOKEN)
-
-    @patch("cloudbox.github.revoke_quietly")
-    @patch("cloudbox.github.GitHubClient")
-    def test_missing_expiry_revokes_token(self, client, revoke):
-        self.response["expires_at"] = None
-        client.return_value.request.side_effect = self.github_response
-        with self.assertRaises(CloudboxError) as raised:
-            prepare_github_access(self.session, self.deployment)
-        self.assertEqual(raised.exception.code, "github_token_invalid")
-        revoke.assert_called_once_with(TOKEN)
-
-    @patch("cloudbox.github.revoke_quietly")
-    @patch("cloudbox.github.GitHubClient")
-    def test_wrong_bot_identity_revokes_token(self, client, revoke):
-        client.return_value.request.side_effect = lambda method, path, data=None: (
-            {"id": BOT_ID, "login": "other[bot]"} if path.startswith("/users/")
-            else self.github_response(method, path, data))
-        with self.assertRaises(CloudboxError) as raised:
-            prepare_github_access(self.session, self.deployment)
-        self.assertEqual(raised.exception.code, "github_identity_invalid")
-        revoke.assert_called_once_with(TOKEN)
-
-    def test_expiry_includes_startup_and_cleanup(self):
-        now = datetime.now(timezone.utc)
-        timeout = 3300
-        required = timeout + TOKEN_STARTUP_MARGIN_SECONDS + TOKEN_CLEANUP_MARGIN_SECONDS
-        token_deadline((now + timedelta(seconds=required)).isoformat(), timeout, now=now)
-        with self.assertRaises(CloudboxError) as raised:
-            token_deadline((now + timedelta(seconds=required - 1)).isoformat(), timeout, now=now)
-        self.assertEqual(raised.exception.code, "github_token_expires_early")
 
 
 class GitHubAPITests(unittest.TestCase):
