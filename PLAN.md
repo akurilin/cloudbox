@@ -112,7 +112,8 @@ new deletion path has not been run. The current deployment is unchanged.
 Use `prod` and `test`; the user selected `prod`, not `persistent`.
 Approved implementation: one repository and shared Terraform roots, with separate
 environment inputs, local backend paths, and Terraform working data. Require
-`--env test`, `--env prod`, or `--env legacy`; no default. Legacy keeps the
+`--env test`, `--env prod`, or `--env legacy`, except for the full test, which
+defaults to test and rejects other environments. Legacy keeps the
 existing management-account deployment and its original state paths.
 Never migrate that state into either new account.
 
@@ -122,14 +123,19 @@ Terraform executes in each stage's `source/` directory, separate from state.
 Keys default to `.env.<env>`; `--env-file .env` explicitly selects the shared key.
 Setup still submits no jobs. Each CLI and helper uses the selected environment.
 
-Full test: `uv run python scripts/e2e_cloud.py --env test --env-file .env`.
-Require an empty Cloudbox deployment and state, and a test account distinct from
-prod and legacy. Check resources, run setup, submit the math job, validate its
+Full test: `uv run python scripts/e2e_cloud.py --env-file .env`.
+The user permits test resources to be removed at any time. No approval prompt
+or `--yes` is needed for the full test. Keep account, state, and ownership checks;
+this changes human approval, not IAM permissions or deletion scope.
+Reset existing Cloudbox test resources with the standard teardown, including
+permanent secret deletion. Require a clean check before setup and a test account
+distinct from prod and legacy. Run setup, submit the math job, validate its
 downloaded JSON and VM termination, check list/log operations, then tear down.
 Try cleanup after setup or job failure. Permanently delete the test secret and
 require a final clean check. A failed job or failed cleanup fails the test.
 Keep local reports and downloads. Do not run other commands against test during
-the full test. There is no account-wide erase or automatic wipe of existing data.
+the full test. Unknown targets or missing state still fail; do not erase unrelated
+account resources. Standalone setup/teardown confirmation behavior is unchanged.
 
 A shared checker uses a Terraform-owned resource manifest, state and plan
 coverage checks, and AWS inventory of supported project resources. It also checks
@@ -139,8 +145,11 @@ Cloudbox resources in that scope; AWS defaults, SSO access, unrelated resources,
 and retained service history remain. Terraform destroy alone is not an orphan
 resource checker.
 
-This pass implements the commands. A live full lifecycle test requires separate
-approval for AWS/OpenRouter charges and permanent deletion of its test data.
+The Cloudbox test lifecycle has standing user approval, including AWS/OpenRouter
+charges and permanent test-data deletion. Prod and legacy operations do not.
+Default selection, automatic reset, no-prompt execution, and prod rejection
+passed local control-flow checks with AWS calls replaced. No live run was made
+for this change. The old `--yes` flag remains an optional compatibility no-op.
 
 Implementation checks found that `TF_DATA_DIR` alone did not isolate Terraform
 from the old root's implicit state. Use separate execution directories with links
@@ -171,8 +180,9 @@ Verification completed on 2026-09-02:
   test then passed; report: `.cloudbox/e2e/test/12ed13c8-53d7-4b12-87af-1adb89fbcaaf/report.json`.
 
 No infrastructure apply, agent job, or teardown ran in this pass. The new full
-lifecycle path is not yet cloud-verified. Run it only with approval for charges
-and permanent test-data deletion. The legacy deployment remains in AWS.
+lifecycle path is not yet cloud-verified. The user later removed the full test's
+approval requirement and permitted automatic test reset, as recorded above.
+The legacy deployment remains in AWS.
 
 Initial read-only Organizations checks on 2026-09-02 found that account
 `618170664907` is the management account of `o-4vt9cqww4f`, then its only account.

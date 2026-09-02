@@ -12,7 +12,8 @@ CLI -> MicroVM -> Pi -> OpenRouter
 ## Environments
 
 Use one repository with separate credentials, configuration, and Terraform state.
-Every command requires `--env`; there is no default account.
+Commands require `--env`, except the full test, which defaults to `test` and
+cannot use another environment.
 
 | Environment | AWS account | SSO profile |
 | --- | --- | --- |
@@ -59,22 +60,23 @@ conflicts. After a failed stage, correct the error and run setup again.
 ## Full cloud test
 
 ```sh
-uv run python scripts/e2e_cloud.py --env test --env-file .env
+uv run python scripts/e2e_cloud.py --env-file .env
 ```
 
-One approval covers this sequence; `--yes` permits unattended use:
+The test runs without approval prompts. The test deployment is disposable:
 
 ```text
-check clean -> setup -> math job -> download and validate -> teardown -> check clean
+reset test -> check clean -> setup -> math job -> validate -> teardown -> check clean
 ```
 
-The test refuses `prod`, `legacy`, shared account IDs, and a non-empty Cloudbox
-deployment. It checks `(12345 * 6789) + 98765 == 83908970`, the downloaded JSON,
+The test clears an existing Cloudbox test deployment before setup. It refuses
+`prod`, `legacy`, shared account IDs, and unknown deletion targets. It checks
+`(12345 * 6789) + 98765 == 83908970`, the downloaded JSON,
 run status, logs, listing, and VM termination. It tries teardown even if setup or
 the job fails. Cleanup failure fails the test. AWS and OpenRouter charges apply.
 
-Test cleanup permanently deletes its secret, results, logs, and image. Local
-reports and downloaded results stay under `.cloudbox/`. Do not run other setup,
+Reset and cleanup permanently delete the test secret, results, logs, and image.
+Local reports and downloaded results stay under `.cloudbox/`. Do not run other setup,
 teardown, or job commands against `test` during this test. If cleanup fails or the
 process is killed, run teardown again with the same configuration and state.
 

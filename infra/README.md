@@ -11,8 +11,9 @@ uv run python scripts/teardown.py --env test --force-delete-secret
 uv run python scripts/check_resources.py --env test --require-clean
 ```
 
-Setup prepares infrastructure only. The separate `scripts/e2e_cloud.py --env test`
-command tests setup, a real job, and teardown. See [usage](../README.md).
+Setup prepares infrastructure only. The separate `scripts/e2e_cloud.py` command
+defaults to test, resets it without a prompt, then tests setup, a real job, and
+teardown. Account and ownership checks remain. See [usage](../README.md).
 
 ## Ownership and state
 

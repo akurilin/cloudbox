@@ -1,4 +1,4 @@
-"""Build, test, and remove an initially empty test deployment."""
+"""Rebuild, test, and remove the disposable test deployment."""
 
 import argparse
 from contextlib import redirect_stdout
@@ -11,7 +11,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cloudbox.common import ROOT, CloudboxError, emit, error_record, operator_session, timestamp
-from cloudbox.environments import add_environment_argument, get_environment
+from cloudbox.environments import get_environment
 from cloudbox.resources import check_resources
 from scripts import setup, smoke_cloud, teardown
 
@@ -116,13 +116,16 @@ def run_stage(report, name, entrypoint, arguments):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Create, test, and remove Cloudbox in an empty test account.")
-    add_environment_argument(parser)
+    parser = argparse.ArgumentParser(description="Rebuild, test, and remove Cloudbox test resources without approval.")
+    parser.add_argument("--env", choices=(TEST_ENVIRONMENT,), default=TEST_ENVIRONMENT,
+                        help="Defaults to test; other environments are rejected.")
     parser.add_argument("--env-file", type=Path, help="OpenRouter key file; defaults to .env.test.")
-    parser.add_argument("--yes", action="store_true", help="Approve cloud usage and permanent deletion of test resources.")
+    # Accept old commands; test resources no longer need interactive approval.
+    parser.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
-    report, setup_started = None, False
+    report, reset_started, setup_started = None, False, False
     environment = get_environment(arguments.env)
+    teardown_arguments = ["--env", environment.name, "--yes", "--force-delete-secret"]
     stage = "preflight"
     try:
         config = test_configuration(environment)
@@ -133,19 +136,18 @@ def main(argv=None):
         initial = check_resources(environment)
         report.data["before"] = initial
         report.save()
-        if not initial["clean"] or not initial["local_state_empty"]:
-            raise CloudboxError("test_not_empty", "Test resources or state already exist. This test will not delete them.")
         print(f"Test account: {config['aws_account_id']} ({config['aws_region']})\n"
-              "Create infrastructure; run one math job; permanently delete test resources and the secret.\n"
+              "Remove existing Cloudbox test resources; rebuild; run one math job; remove test resources and the secret.\n"
               "AWS and OpenRouter charges apply. Do not use this test account during the test.", file=sys.stderr)
-        if not arguments.yes:
-            # Keep stdout as JSON even when approval is declined.
-            print("Approve the full lifecycle test? [y/N] ", end="", file=sys.stderr, flush=True)
-            if input().strip().lower() not in {"y", "yes"}:
-                raise CloudboxError("not_approved", "The lifecycle test was not approved.")
         test_configuration(environment, config)
-        # Recheck after approval; never remove a pre-existing test deployment.
+        if not initial["clean"] or not initial["local_state_empty"]:
+            # Reset tracked test resources; teardown retains state and ownership guards.
+            stage, reset_started = "reset", True
+            run_stage(report, stage, teardown.main, teardown_arguments)
+        stage = "verify_clean"
+        test_configuration(environment, config)
         check_resources(environment, require_clean=True)
+        report.event(stage, {"status": "passed"})
         setup_arguments = ["--env", environment.name, "--yes"]
         if arguments.env_file:
             setup_arguments.extend(("--env-file", str(arguments.env_file)))
@@ -167,11 +169,12 @@ def main(argv=None):
             # Run cleanup after setup errors and Ctrl-C; retain both failure records.
             try:
                 test_configuration(environment, config)
-                run_stage(report, "teardown", teardown.main,
-                          ["--env", environment.name, "--yes", "--force-delete-secret"])
+                run_stage(report, "teardown", teardown.main, teardown_arguments)
             except (Exception, KeyboardInterrupt) as error:
                 report.data["cleanup_failure"] = error_record(error)
                 report.event("teardown", {"status": "failed", "failure": error_record(error)})
+        if report is not None and (reset_started or setup_started):
+            # Inspect a failed reset without repeating its destructive operation.
             try:
                 test_configuration(environment, config)
                 final = check_resources(environment)
