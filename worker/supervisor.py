@@ -1,4 +1,4 @@
-"""Run Pi once, save its JSON artifact, and stop the current AWS MicroVM."""
+"""Run Pi once, save its finish report, and stop the current AWS MicroVM."""
 
 import base64
 import json
@@ -20,15 +20,19 @@ from github_access import (
     child_environment, github_contract, github_environment, revoke_token, validate_github_spec,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 DEFAULT_TIMEOUT_SECONDS = 600
 MAX_TIMEOUT_SECONDS = 3300
 CLEANUP_SECONDS = 30
 STOP_GRACE_SECONDS = 3
 MAX_PROMPT_CHARACTERS = 128_000
-MAX_RESULT_BYTES = 1024 * 1024
-MAX_SPEC_BYTES = MAX_RESULT_BYTES
-MAX_BLOCKED_REASON_CHARACTERS = 1024
+MAX_REPORT_BYTES = 1024 * 1024
+MAX_REPORT_DEPTH = 128
+MAX_SPEC_BYTES = MAX_REPORT_BYTES
+REPORT_STATUSES = {"completed", "blocked"}
+REPORT_FIELDS = {"status", "summary", "result"}
+FINISH_TOOL = "finish"
+MODEL_ERROR_STOPS = {"error", "aborted", "length"}
 STDERR_CHUNK_BYTES = 8192
 MAX_TRACE_TEXT_BYTES = 8 * 1024
 MAX_TRACE_RECORD_BYTES = 16 * 1024
@@ -66,32 +70,61 @@ SECRET_ASSIGNMENT_PATTERN = re.compile(
 )
 URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/\s:@]+:[^@\s/]+@", re.IGNORECASE)
 REASONING_TAG_PATTERN = re.compile(r"<(?:think|thinking|reasoning)>.*?(?:</(?:think|thinking|reasoning)>|$)", re.DOTALL | re.IGNORECASE)
-OUTPUT_PATH = Path("output/result.json")
 PROVIDER = "openrouter"
 APPLICATION_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = Path("/tmp/cloudbox")
 TOKEN_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
-KNOWN_TOOLS = {"read", "bash", "edit", "write", "grep", "find", "ls"}
+KNOWN_TOOLS = {"read", "bash", "edit", "write", "grep", "find", "ls", FINISH_TOOL}
 AWS_CONFIG = Config(
     connect_timeout=2, read_timeout=5, retries={"total_max_attempts": 1}
 )
 LOG_LOCK = threading.Lock()
 AGENT_CONTRACT = (
     "You are an unattended worker. Complete the user's task in the current directory. "
-    f"Write the requested result as valid JSON to {OUTPUT_PATH}. Do not write AWS records. "
-    "Do not inspect or print credentials. The result file must be non-empty and at most "
-    f"{MAX_RESULT_BYTES} bytes. Your final reply must be only the JSON object "
-    '{"status":"completed"}. If you cannot complete the task, do not wait for input; '
-    'reply only {"status":"blocked","reason":"short reason"}.'
-    " Use only access granted to this run. Do not discover or take credentials, exploit systems, "
-    "or bypass access controls. You can install public dependencies inside the sandbox. "
-    "If a required tool or permission cannot be obtained through authorized means, return "
-    "the blocked status with the missing requirement in reason."
+    "When finished, call finish. If blocked, explain what is missing. Do not wait for input. "
+    "Use only access granted to this run. Do not inspect, print, or take credentials, "
+    "write AWS records, exploit systems, or bypass access controls. "
+    "You can install public dependencies inside the sandbox."
 )
 
 
 def utc_now():
     return datetime.now(UTC).isoformat()
+
+
+def validate_report(report):
+    # Recheck the tool result before storage; logs use a separate, truncated copy.
+    if (not isinstance(report, dict) or report.keys() - REPORT_FIELDS
+            or not isinstance(report.get("status"), str) or report["status"] not in REPORT_STATUSES
+            or not isinstance(report.get("summary"), str) or not report["summary"].strip()
+            or ("result" in report and not isinstance(report["result"], dict))):
+        raise ValueError("invalid_finish_report")
+    pending = [(report, 0)]
+    try:
+        while pending:
+            value, depth = pending.pop()
+            if depth > MAX_REPORT_DEPTH:
+                raise ValueError("finish_report_too_deep")
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise ValueError("invalid_json_key")
+                    key.encode("utf-8")
+                    pending.append((item, depth + 1))
+            elif isinstance(value, list):
+                pending.extend((item, depth + 1) for item in value)
+            elif isinstance(value, str):
+                value.encode("utf-8")
+            elif value is None or isinstance(value, (bool, int)):
+                continue
+            elif not isinstance(value, float) or not math.isfinite(value):
+                raise ValueError("invalid_json_value")
+        encoded = json.dumps(report, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        if len(encoded.encode("utf-8")) > MAX_REPORT_BYTES:
+            raise ValueError("finish_report_too_large")
+        return json.loads(encoded)
+    except (TypeError, UnicodeError, RecursionError) as error:
+        raise ValueError("invalid_finish_report") from error
 
 
 def emit(run_id, event_type, **metadata):
@@ -107,7 +140,9 @@ def put_json(s3, bucket, key, value):
         s3.put_object(
             Bucket=bucket,
             Key=key,
-            Body=json.dumps(value, allow_nan=False).encode(),
+            Body=json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ).encode(),
             ContentType="application/json",
             IfNoneMatch="*",
         )
@@ -257,10 +292,12 @@ class PiEvents:
         self.run_id = run_id
         self.activity_filter = ActivityFilter(secrets)
         self.final_message = None
+        self.report = None
         self.usage = {key: 0 for key in TOKEN_FIELDS}
         self.usage["estimated_cost_usd"] = 0
         self.seen_messages = set()
         self.tools_started = {}
+        self.finish_started = set()
 
     def trace(self, event_type, **metadata):
         emit(self.run_id, event_type, **self.activity_filter.record(metadata))
@@ -271,7 +308,7 @@ class PiEvents:
                 event = json.loads(line)
                 if isinstance(event, dict):
                     self.accept(event)
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError, RecursionError):
                 # Pi diagnostics are not task status and can contain model text.
                 continue
 
@@ -314,12 +351,25 @@ class PiEvents:
             if event_type == "tool_execution_start":
                 self.tools_started[tool_id] = time.monotonic()
                 metadata["arguments"] = event.get("args")
+                if tool_name == FINISH_TOOL:
+                    self.finish_started.add(tool_id)
             else:
                 started = self.tools_started.pop(tool_id, None)
                 metadata["outcome"] = "error" if event.get("isError") else "ok"
                 if started is not None:
                     metadata["duration_seconds"] = round(time.monotonic() - started, 3)
                 metadata["result"] = visible_result(event.get("result"))
+                if tool_name == FINISH_TOOL:
+                    result = event.get("result", {})
+                    matched = tool_id in self.finish_started
+                    self.finish_started.discard(tool_id)
+                    if (matched and started is not None and not self.tools_started and self.report is None
+                            and event.get("isError") is False and isinstance(result, dict)
+                            and result.get("terminate") is True):
+                        try:
+                            self.report = validate_report(result.get("details", {}).get("report"))
+                        except (ValueError, AttributeError):
+                            metadata["outcome"] = "invalid_finish_report"
             self.trace(event_type, **metadata)
         elif event_type in {
             "agent_start",
@@ -333,25 +383,15 @@ class PiEvents:
             self.trace(event_type, **metadata)
 
     def completion(self):
-        message = self.final_message
-        if not message or message.get("stopReason") != "stop":
-            return "failed", "agent_terminal_error", None
-        text = "".join(
-            item.get("text", "")
-            for item in message.get("content", [])
-            if item.get("type") == "text"
-        )
-        try:
-            declaration = json.loads(text)
-        except (ValueError, TypeError):
-            return "failed", "invalid_completion_signal", None
-        if declaration == {"status": "completed"}:
-            return "succeeded", "completed", None
-        if isinstance(declaration, dict) and declaration.get("status") == "blocked":
-            reason = declaration.get("reason")
-            if isinstance(reason, str) and reason.strip():
-                return "failed", "agent_blocked", reason[:MAX_BLOCKED_REASON_CHARACTERS]
-        return "failed", "invalid_completion_signal", None
+        if self.final_message and self.final_message.get("stopReason") in MODEL_ERROR_STOPS:
+            return "failed", "agent_terminal_error"
+        if self.report is None:
+            return "failed", "missing_finish"
+        if self.tools_started:
+            return "failed", "unfinished_tools"
+        if self.report["status"] == "completed":
+            return "succeeded", "completed"
+        return "failed", "agent_blocked"
 
 
 def stop_process(process):
@@ -403,7 +443,6 @@ def run_pi(spec, key, workspace, deadline, run_id, access_environment=None, reda
             "PI_CODING_AGENT_DIR": str(workspace / ".pi" / "agent"),
             "PI_OFFLINE": "1",
             "PI_SKIP_VERSION_CHECK": "1",
-            "CLOUDBOX_RESULT_PATH": str(workspace / OUTPUT_PATH),
         }
     )
     environment.update(access_environment or {})
@@ -420,6 +459,8 @@ def run_pi(spec, key, workspace, deadline, run_id, access_environment=None, reda
         "--no-skills",
         "--no-prompt-templates",
         "--no-themes",
+        "--extension",
+        str(APPLICATION_DIR / "finish.mjs"),
         "--no-context-files",
         "--no-approve",
         "--provider",
@@ -481,27 +522,6 @@ def run_pi(spec, key, workspace, deadline, run_id, access_environment=None, reda
     return process.returncode, timed_out, events
 
 
-def reject_json_constant(_value):
-    raise ValueError("Non-finite JSON number")
-
-
-def artifact_bytes(workspace):
-    path = workspace / OUTPUT_PATH
-    if path.is_symlink() or not path.is_file():
-        return None, "missing_output"
-    with path.open("rb") as stream:
-        body = stream.read(MAX_RESULT_BYTES + 1)
-    if not body:
-        return None, "empty_output"
-    if len(body) > MAX_RESULT_BYTES:
-        return None, "oversized_output"
-    try:
-        json.loads(body.decode("utf-8"), parse_constant=reject_json_constant)
-    except (ValueError, UnicodeError):
-        return body, "invalid_output_json"
-    return body, None
-
-
 def validate_spec(spec):
     validate_github_spec(spec)
     prompt = spec.get("prompt")
@@ -535,8 +555,6 @@ def supervise(microvm_id, payload):
         "reason": "worker_error",
         "started_at": started_at,
         "exit_code": None,
-        "artifact_key": None,
-        "artifact_complete": False,
         "agent_version": os.environ.get("PI_VERSION"),
     }
     # Create AWS clients after restore. Data credentials cannot grant runtime actions.
@@ -578,7 +596,6 @@ def supervise(microvm_id, payload):
             },
         )
         workspace.mkdir(parents=True, exist_ok=False)
-        (workspace / OUTPUT_PATH.parent).mkdir()
         emit(run_id, "worker_start", microvm_id=microvm_id)
         secret = runtime.client("secretsmanager", config=AWS_CONFIG).get_secret_value(
             SecretId=payload["openrouter_secret_arn"],
@@ -603,37 +620,16 @@ def supervise(microvm_id, payload):
         elif exit_code:
             result.update(status="failed", reason="agent_exit_error")
         else:
-            status, reason, blocked_reason = events.completion()
+            status, reason = events.completion()
             result.update(status=status, reason=reason)
-            if blocked_reason:
-                result["blocked_reason"] = blocked_reason
     except subprocess.TimeoutExpired:
         result.update(status="timed_out", reason="deadline")
     except Exception as error:
         # Exception text can include provider responses. Emit only its type.
         emit(run_id, "worker_error", error_type=type(error).__name__)
     finally:
-        try:
-            if s3 is not None:
-                body, output_error = artifact_bytes(workspace)
-                if output_error and result["status"] == "succeeded":
-                    result.update(status="failed", reason=output_error)
-                emit(run_id, "output_validation", outcome=output_error or "valid")
-                if body is not None:
-                    artifact_key = f"{prefix}/{OUTPUT_PATH}"
-                    s3.put_object(
-                        Bucket=bucket,
-                        Key=artifact_key,
-                        Body=body,
-                        ContentType="application/json",
-                    )
-                    result["artifact_key"] = artifact_key
-                    result["artifact_complete"] = result["status"] == "succeeded"
-                    emit(run_id, "output_uploaded", size_bytes=len(body))
-        except Exception as error:
-            if result["status"] == "succeeded":
-                result.update(status="failed", reason="output_upload_error")
-            emit(run_id, "output_error", error_type=type(error).__name__)
+        if events is not None and events.report is not None:
+            result["report"] = events.report
         if payload.get("github_token"):
             result["github_token_revoked"] = revoke_token(payload["github_token"], deadline - STOP_GRACE_SECONDS)
             emit(run_id, "github_token_revocation", confirmed=result["github_token_revoked"])

@@ -10,6 +10,13 @@
 - Distinguish planning, local implementation, and AWS deployment. AWS login is
   not deployment approval.
 
+## Test environment
+
+Keep the test environment deployed during implementation. Update its resources
+and worker image as needed. Do not reset or tear it down after each change.
+Stop completed job VMs; remove the environment when requested or when testing
+the full setup/teardown lifecycle.
+
 ## Full cloud infra + basic task test
 
 Run `scripts/e2e_cloud.py` (infrastructure and math) manually, only on user request.

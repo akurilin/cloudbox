@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cloudbox.common import CloudboxError, emit, error_record
+from cloudbox.common import RUN_SCHEMA_VERSION, CloudboxError, emit, error_record
 from cloudbox.environments import add_environment_argument, get_environment
 
 FACTOR_LEFT = 12345
@@ -22,10 +22,11 @@ LOG_WAIT_SECONDS = 60
 POLL_SECONDS = 5
 COMMAND_TIMEOUT_SECONDS = 60
 SUCCESS_STATUS = "succeeded"
+COMPLETED_STATUS = "completed"
 TERMINATED_STATE = "TERMINATED"
 INTERRUPTED_EXIT_CODE = 130
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT_PATH = Path("output/result.json")
+RESULT_PATH = Path("result.json")
 TEST_NAME = "cloud_math"
 
 
@@ -108,9 +109,7 @@ def main(argv=None):
     environment = get_environment(arguments.env)
     prompt = (
         f"Calculate ({FACTOR_LEFT} * {FACTOR_RIGHT}) + {OFFSET}. "
-        "Use a tool to check your calculation. Write the integer answer to "
-        'output/result.json as a JSON object with exactly one key, "answer". '
-        "Do not put Markdown in the file."
+        "Check with a tool. Set finish.result to a JSON object with an integer answer field."
     )
     identity, terminated, status, destination = None, False, None, None
     stage = "submit"
@@ -155,12 +154,27 @@ def main(argv=None):
 
         stage = "download"
         command(environment, "download", identity, "--output", str(destination))
-        artifact = destination / ARTIFACT_PATH
-        result = json.loads(artifact.read_text(encoding="utf-8"))
-        if not isinstance(result, dict) or set(result) != {"answer"}:
+        result_path = destination / RESULT_PATH
+        saved = json.loads(result_path.read_text(encoding="utf-8"))
+        report = saved.get("report") if isinstance(saved, dict) else None
+        if (
+            not isinstance(saved, dict)
+            or saved.get("schema_version") != RUN_SCHEMA_VERSION
+            or saved.get("status") != SUCCESS_STATUS
+            or not isinstance(report, dict)
+            or report.get("status") != COMPLETED_STATUS
+            or not isinstance(report.get("summary"), str)
+            or not report["summary"].strip()
+        ):
+            raise CloudboxError(
+                "invalid_report",
+                "The saved run and finish report must both show success.",
+            )
+        result = report.get("result")
+        if not isinstance(result, dict) or "answer" not in result:
             raise CloudboxError(
                 "invalid_answer",
-                "The downloaded file must contain only an answer field.",
+                "The finish report must contain result.answer.",
             )
         if type(result["answer"]) is not int or result["answer"] != EXPECTED_ANSWER:
             raise CloudboxError(
@@ -195,7 +209,7 @@ def main(argv=None):
                 "status": "passed",
                 "run_id": identity,
                 "answer": result["answer"],
-                "artifact_path": str(artifact),
+                "result_path": str(result_path),
                 "compute_state": status["compute_state"],
                 "listed": True,
                 "log_event_count": events,

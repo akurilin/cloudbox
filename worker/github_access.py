@@ -8,8 +8,7 @@ from datetime import datetime
 
 from github_api import GitHubClient
 
-ARTIFACT_SCHEMA_VERSION = 1
-GITHUB_SCHEMA_VERSION = 2
+RUN_SCHEMA_VERSION = 3
 API_TIMEOUT_SECONDS = 10
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 GITHUB_PERMISSIONS = {"contents", "issues", "pull_requests", "metadata"}
@@ -24,13 +23,13 @@ GIT_CONFIG = (
 
 
 def validate_github_spec(spec):
-    # Version 2 requires explicit capabilities; older workers reject these jobs.
+    # Version 3 uses the finish tool; older workers reject these jobs.
+    if type(spec.get("schema_version")) is not int or spec["schema_version"] != RUN_SCHEMA_VERSION:
+        raise ValueError("invalid_spec")
     access = spec.get("github")
     if access is None:
-        if spec.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
-            raise ValueError("invalid_spec")
         return
-    if spec.get("schema_version") != GITHUB_SCHEMA_VERSION or not isinstance(access, dict):
+    if not isinstance(access, dict):
         raise ValueError("invalid_github_access")
     repositories = access.get("repositories")
     permissions = access.get("permissions")

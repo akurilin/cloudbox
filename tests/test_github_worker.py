@@ -30,7 +30,7 @@ TEST_IDENTITY = {"name": "test-agent[bot]", "email": "42+test-agent[bot]@users.n
 
 def access_spec():
     return {
-        "schema_version": 2, "prompt": "Read https://github.com/owner/project/issues/1",
+        "schema_version": 3, "prompt": "Read https://github.com/owner/project/issues/1",
         "model": "test-model", "timeout_seconds": 600, "image_arn": "test-image", "image_version": "1",
         "github": {"repositories": [{"id": 1, "full_name": "owner/project"}],
                    "permissions": {"contents": "write", "issues": "write",
@@ -46,9 +46,10 @@ def access_payload():
 
 class GitHubAccessTests(unittest.TestCase):
     def test_schema_versions_require_matching_capabilities(self):
-        validate_github_spec({"schema_version": 1})
+        validate_github_spec({"schema_version": 3})
         validate_github_spec(access_spec())
-        for spec in ({"schema_version": 2}, {**access_spec(), "schema_version": 1}):
+        for spec in ({"schema_version": 1}, {"schema_version": 2},
+                     {**access_spec(), "schema_version": 1}, {**access_spec(), "schema_version": 2}):
             with self.subTest(spec=spec), self.assertRaises(ValueError):
                 validate_github_spec(spec)
 
@@ -59,7 +60,7 @@ class GitHubAccessTests(unittest.TestCase):
                        {"repositories": [{"id": 1, "full_name": "owner/project"}],
                         "permissions": {"administration": "write"}}):
             with self.subTest(access=access), self.assertRaises(ValueError):
-                validate_github_spec({"schema_version": 2, "github": access})
+                validate_github_spec({"schema_version": 3, "github": access})
 
     def test_reject_token_that_expires_before_cleanup(self):
         payload = access_payload()
@@ -77,7 +78,7 @@ class GitHubAccessTests(unittest.TestCase):
                 validate_github_spec(spec)
 
     def test_ordinary_job_gets_no_github_credentials(self):
-        spec = {"schema_version": 1}
+        spec = {"schema_version": 3}
         self.assertEqual({}, github_environment(spec, {}, Path("/tmp/run"), time.monotonic() + 60))
         self.assertEqual("", github_contract(spec))
         with self.assertRaisesRegex(ValueError, "unexpected_github_token"):
@@ -144,6 +145,7 @@ class GitHubAccessTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(source_archive())) as archive:
             self.assertIn("github_api.py", archive.namelist())
             self.assertIn("github_access.py", archive.namelist())
+            self.assertIn("finish.mjs", archive.namelist())
             self.assertFalse(any(name.endswith(".pem") or "/" in name for name in archive.namelist()))
             self.assertEqual((ROOT / "cloudbox" / "github_api.py").read_bytes(), archive.read("github_api.py"))
 
@@ -151,9 +153,12 @@ class GitHubAccessTests(unittest.TestCase):
 class SupervisorAccessTests(unittest.TestCase):
     def test_pi_keeps_generic_prompt_workspace_and_result_contract(self):
         process = Mock()
-        process.stdout = io.StringIO(json.dumps({"type": "message_end", "message": {
-            "role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": '{"status":"completed"}'}],
-        }}) + "\n")
+        report = {"status": "completed", "summary": "Done."}
+        process.stdout = io.StringIO("\n".join(json.dumps(event) for event in (
+            {"type": "tool_execution_start", "toolName": "finish", "toolCallId": "finish-1", "args": report},
+            {"type": "tool_execution_end", "toolName": "finish", "toolCallId": "finish-1", "isError": False,
+             "result": {"content": [], "details": {"report": report}, "terminate": True}},
+        )) + "\n")
         process.stderr = io.StringIO("")
         process.stdin = Mock()
         process.returncode = 0
@@ -167,11 +172,12 @@ class SupervisorAccessTests(unittest.TestCase):
         self.assertEqual((0, False, "succeeded"), (code, timed_out, events.completion()[0]))
         process.stdin.write.assert_called_once_with(spec["prompt"])
         self.assertEqual(workspace, launch.call_args.kwargs["cwd"])
-        self.assertEqual(str(workspace / "output/result.json"), launch.call_args.kwargs["env"]["CLOUDBOX_RESULT_PATH"])
+        self.assertNotIn("CLOUDBOX_RESULT_PATH", launch.call_args.kwargs["env"])
         self.assertEqual(TEST_TOKEN, launch.call_args.kwargs["env"]["GH_TOKEN"])
         command = launch.call_args.args[0]
         self.assertIn("--no-context-files", command)
         self.assertIn("--no-extensions", command)
+        self.assertEqual(str(ROOT / "worker" / "finish.mjs"), command[command.index("--extension") + 1])
         self.assertNotIn(TEST_TOKEN, " ".join(command))
 
     def supervise_with_agent(self, agent):
@@ -211,17 +217,14 @@ class SupervisorAccessTests(unittest.TestCase):
         result = self.supervise_with_agent(RuntimeError("agent failed"))
         self.assertEqual("worker_error", result["reason"])
 
-    def test_missing_permission_preserves_blocked_reason_without_artifact(self):
+    def test_missing_permission_preserves_blocked_report_without_artifact(self):
         reason = "Missing permission to write pull requests."
         events = supervisor.PiEvents(TEST_RUN_ID)
-        events.final_message = {"stopReason": "stop", "content": [{
-            "type": "text", "text": json.dumps({"status": "blocked", "reason": reason}),
-        }]}
+        events.report = {"status": "blocked", "summary": reason}
         result = self.supervise_with_agent(lambda *_args: (0, False, events))
         self.assertEqual("agent_blocked", result["reason"])
-        self.assertEqual(reason, result["blocked_reason"])
-        self.assertIsNone(result["artifact_key"])
-        self.assertFalse(result["artifact_complete"])
+        self.assertEqual(reason, result["report"]["summary"])
+        self.assertFalse({"artifact_key", "artifact_complete"} & result.keys())
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from .common import (
     MAX_PROMPT_CHARACTERS,
     MAX_RECORD_BYTES,
     MICROVM_SERVICE,
+    RUN_SCHEMA_VERSION,
     SCHEMA_VERSION,
     SDK_CONFIG,
     TASK_STATUSES,
@@ -160,6 +161,8 @@ class Runs:
                 **supplied,
             }
         )
+        # User inputs keep schema 1; every new worker run uses finish reporting.
+        spec["schema_version"] = RUN_SCHEMA_VERSION
         image_version = deployment.get("image_version")
         if (
             not isinstance(image_version, str)
@@ -198,12 +201,9 @@ class Runs:
             }
             access = prepare_github_access(self.session, deployment)
             if access:
-                spec.update(
-                    {"schema_version": GITHUB_SCHEMA_VERSION, "github": access.github}
-                )
+                spec["github"] = access.github
                 payload.update(
                     {
-                        "schema_version": GITHUB_SCHEMA_VERSION,
                         "github_token": access.token,
                         "github_token_expires_at": access.expires_at,
                     }
@@ -220,7 +220,6 @@ class Runs:
                     "provider": "openrouter",
                     "image_arn": deployment["image_arn"],
                     "image_version": image_version,
-                    "required_output": "output/result.json",
                     "resources": {
                         "memory_mib": deployment["memory_mib"],
                         "architecture": deployment["architecture"],
@@ -405,18 +404,23 @@ class Runs:
             and after["compute_state"] == AWS_TERMINATED
             and after["result"] is None
         ):
+            schema_version = launch.get("schema_version")
+            if schema_version is None:
+                schema_version = (self.record(identity, "spec.json") or {}).get(
+                    "schema_version", SCHEMA_VERSION
+                )
             result = {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": schema_version,
                 "run_id": identity,
                 "status": "cancelled",
                 "reason": "operator_cancelled",
                 "started_at": launch.get("started_at"),
                 "finished_at": timestamp(),
                 "exit_code": None,
-                "artifact_key": None,
-                "artifact_complete": False,
                 "usage": {},
             }
+            if schema_version in (SCHEMA_VERSION, GITHUB_SCHEMA_VERSION):
+                result.update(artifact_key=None, artifact_complete=False)
             put_record(
                 self.s3,
                 self.bucket,

@@ -37,6 +37,7 @@ SOURCE_NAMES = (
     "Dockerfile",
     "listener.py",
     "supervisor.py",
+    "finish.mjs",
     "github_access.py",
     "requirements.txt",
     "startup.sh",

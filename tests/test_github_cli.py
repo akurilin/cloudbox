@@ -60,23 +60,25 @@ class GitHubCLITests(unittest.TestCase):
         spec = records[0]
         self.assertEqual(payload["github_token"], TOKEN)
         self.assertEqual(payload["github_token_expires_at"], self.access.expires_at)
-        self.assertEqual(payload["schema_version"], 2)
-        self.assertEqual(spec["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(spec["schema_version"], 3)
         self.assertEqual(spec["github"], self.access.github)
         self.assertEqual(spec["prompt"], PROMPT)
         self.assertNotIn(TOKEN, json.dumps(records))
         self.assertFalse({"job_type", "issue_url", "validation_command", "branch"} & spec.keys())
+        self.assertNotIn("required_output", spec)
         self.revoke.assert_not_called()
 
-    def test_run_without_github_keeps_original_schema(self):
+    def test_run_without_github_uses_finish_schema(self):
         self.prepare_access.return_value = None
         self.submit()
         payload = json.loads(self.runs.compute.run_microvm.call_args.kwargs["runHookPayload"])
         spec = json.loads(self.runs.s3.put_object.call_args_list[0].kwargs["Body"])
-        self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(spec["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(spec["schema_version"], 3)
         self.assertNotIn("github_token", payload)
         self.assertNotIn("github", spec)
+        self.assertNotIn("required_output", spec)
 
     def test_large_payload_revokes_before_launch(self):
         self.prepare_access.return_value = GitHubAccess(self.access.github, "x" * MAX_HOOK_PAYLOAD_BYTES, self.access.expires_at)

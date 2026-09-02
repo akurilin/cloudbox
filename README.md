@@ -55,6 +55,8 @@ For `prod`, use its profile and `--env prod`. Setup asks for one approval;
 Setup reports `ready: true`. It does not submit jobs or call a model. AWS charges
 apply. Setup refuses resource deletion, replacement, and untracked resource
 conflicts. After a failed stage, correct the error and run setup again.
+Keep `test` deployed during implementation. Run setup again to apply changes and
+select a new worker image. Use teardown when requested or when testing cleanup.
 
 ## GitHub tools
 
@@ -99,11 +101,11 @@ Use normal prompts for GitHub tasks. For example, replace the URL below:
 
 ```sh
 uv run cloudbox --env test submit --timeout 20m \
-  'Address https://github.com/OWNER/REPO/issues/NUMBER. Run relevant checks, open a draft PR, and post its link on the issue. Save the results as JSON.'
+  'Address https://github.com/OWNER/REPO/issues/NUMBER. Run relevant checks, open a draft PR, and post its link on the issue.'
 ```
 
-Cloudbox checks agent completion and the JSON result, not whether a PR fixes an
-issue. Review external changes independently. No automatic task retry is safe
+Cloudbox records the agent's completion report. Review external changes
+independently. No automatic task retry is safe
 after a lost response: a GitHub action may already have completed.
 
 ## Full cloud test
@@ -141,11 +143,20 @@ To test an existing deployment without deleting it:
 uv run python scripts/smoke_cloud.py --env test
 ```
 
-The worker's `output/result.json` is the answer. The run's top-level `result.json`
-is the supervisor's status record. They are separate files.
-The agent must also end with only `{"status":"completed"}`, or
-`{"status":"blocked","reason":"..."}`. Extra prose fails this completion check.
-The system prompt supplies this contract; task prompts need not repeat it.
+The agent calls `finish` with `status` (`completed` or `blocked`), a short
+`summary`, and an optional JSON object `result`. The tool validates the report and ends
+the agent run. Invalid calls return an error for correction. Call `finish` alone
+after other tools finish. No output file or exact final reply is required.
+
+The supervisor saves these fields under `report` in the run's `result.json`,
+with runtime status, timing, and usage. Crashes and timeouts remain failures even
+if a report claims completion. A blocked report also ends the run. The supervisor
+still revokes credentials and stops the VM. Reports are limited to 1 MiB of JSON
+and 128 nesting levels. Top-level fields are fixed; `result` has arbitrary fields
+whose values can contain any JSON data.
+
+New runs use internal schema 3. Update the worker image before submitting them.
+User input specifications remain schema 1. Historical result files still download.
 
 ## Check or delete resources
 
@@ -179,7 +190,7 @@ Commands return JSON. Check `task_status` and `compute_state`; a successful CLI
 command does not mean that the remote task succeeded.
 
 ```sh
-uv run cloudbox --env prod submit 'Calculate 12 * 13 and write {"answer": 156} to output/result.json.'
+uv run cloudbox --env prod submit 'Calculate 12 * 13. Set finish.result to a JSON object with an integer answer field.'
 uv run cloudbox --env prod list
 uv run cloudbox --env prod status RUN_ID
 uv run cloudbox --env prod logs RUN_ID --follow
@@ -214,14 +225,18 @@ the trace, or `cloudbox logs RUN_ID --follow` while the agent runs.
   key is not available to the worker. Normal cleanup revokes each temporary token;
   forced termination can leave it valid until its one-hour expiry.
 - Default deadline: 600 seconds, including 30 seconds for cleanup; maximum 3,300.
-- Prompt limit: 128,000 characters. Result limit: 1 MiB.
+- Prompt limit: 128,000 characters. Finish report limit: 1 MiB.
 - Run data and logs expire after 30 days; deletion is not immediate at that age.
 - Cancellation can leave an `unknown` outcome. Recovery is not yet tested.
 - No uploads, resume, local worker simulation, or per-run environment changes.
+- Downloads contain run records. General file artifact collection is not implemented;
+  return needed data in the finish report or use the granted external tools.
 
 The prior cloud math test passed on 2026-09-02 against the original
 single-account deployment. A later GitHub-tools run on the same deployment
 also passed: authenticated checkout, a real draft PR, and an issue comment;
 CloudWatch captured commands and results, teardown removed the test resources,
-and the final check was clean. The new multi-account lifecycle test has not yet
-been run against AWS.
+and the final check was clean. The finish-tool check then restored that
+environment and passed on worker image `3.0`. All 111 local tests pass. The
+test environment remains deployed; completed job VMs stopped; prod was not
+changed. The new multi-account lifecycle test has not yet been run against AWS.
