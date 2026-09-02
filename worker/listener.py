@@ -42,7 +42,8 @@ class HookHandler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(body_size))
             payload = json.loads(body["runHookPayload"])
             microvm_id = body["microvmId"]
-            if not isinstance(microvm_id, str) or not microvm_id.startswith("mvm-"):
+            # AWS IDs are opaque. A guessed prefix rejected valid cloud runs.
+            if not isinstance(microvm_id, str) or not microvm_id:
                 raise ValueError("Invalid VM ID")
             if payload["schema_version"] != SCHEMA_VERSION:
                 raise ValueError("Unsupported hook schema")

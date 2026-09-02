@@ -6,9 +6,10 @@ The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
 and attachment, and three worker boundaries. The separately approved main apply
 created 14 items for storage, logs, the secret, and worker roles. The OpenRouter
-key was loaded into Secrets Manager without Terraform. Image creation is blocked
-by IAM; the approved policy correction is now applied and the build is being
-retried. No worker run exists yet. AWS login alone does not authorize deployment.
+key was loaded into Secrets Manager without Terraform. The approved IAM
+corrections are applied. Image `cloudbox-worker` version `1.0` built successfully.
+The first cloud test exposed a listener bug and its VM terminated. Version `2.0`
+is building with the correction. AWS login alone does not authorize deployment.
 
 ## Current spike scope
 
@@ -37,7 +38,12 @@ Anthropic inference integration is part of this spike.
 
 Implementation files now cover Terraform, the Pi worker, the CLI, image builds,
 secret setup, and one cloud smoke test. Terraform validation, Python compilation,
-and shell syntax checks passed. The real cloud test has not run yet.
+and shell syntax checks passed. The real cloud test has run but has not passed.
+
+Cloud test run `97bb7c8b-867e-4a05-8ccc-62394174756e` ended with no result record.
+AWS reported a run-hook HTTP 400 and terminated the VM. The listener assumed an
+`mvm-` ID prefix; AWS returned `microvm-...`. Remove the prefix assumption and
+retry the same cloud test after selecting corrected image version `2.0`.
 
 Image creation returned `AccessDeniedException`. Read-only checks found two
 MicroVM IAM constraints. A saved bootstrap plan updates only the provisioner
@@ -50,7 +56,9 @@ in Sources. The CLI still explicitly uses `NO_INGRESS`.
 A later build denial identified `lambda:TagResource` on `*` during image
 creation. A second saved bootstrap plan adds only that initial-tag grant, limited
 to `us-east-1` and the exact Project/ManagedBy tags. It can tag other Lambda
-resources with those values; worker access is unchanged. Approval is pending.
+resources with those values; worker access is unchanged. The user approved this
+change with "proceed" and it was applied. Image creation then succeeded. Version
+`1.0` was explicitly selected before the first cloud test.
 
 Design review checkpoint: Q1-Q42 are answered. V1 design choices are settled;
 technical checks remain. Implementation is now approved; deployment review remains.
