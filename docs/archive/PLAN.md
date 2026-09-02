@@ -1,5 +1,8 @@
 # Cloudbox plan
 
+Archived on 2026-09-02. This file preserves earlier decisions and test records.
+Its instructions and status entries are historical; it is no longer maintained.
+
 Status: finish tool implemented and verified; test environment remains deployed.
 Last reviewed: 2026-09-02.
 
@@ -13,6 +16,69 @@ alone does not authorize new changes.
 ## Current spike scope
 
 This section overrides the earlier v1 sequence and test requirements below.
+
+### Blocking CLI and output files: code review
+
+Requested on 2026-09-02. Assessment only; implementation and deployment are
+not approved by this request. Reviewed the code at `da21c53`, including local
+changes present before that commit. No application code or AWS resources changed.
+
+The code already submits prompts, stdin, and job specifications to a separate
+MicroVM. Pi runs unattended. The supervisor saves the accepted finish report,
+revokes the GitHub token, and requests VM termination. `submit` returns at launch.
+All CLI output is JSON; command success does not imply task success.
+
+`logs --follow` polls the shared agent/supervisor CloudWatch stream. It records
+completed assistant messages, tool starts/results, and lifecycle events. It has
+no source filters, text deltas, or incremental tool output. Private reasoning is
+excluded. `finish` has a short `summary` and arbitrary `result` object; it has no
+defined full-answer field. `download` reads fixed JSON filenames only. There is
+no general file uploader or signed-link command.
+
+Proposed implementation:
+
+- Add `exec PROMPT` with stdin/spec support. Reuse submission and add bounded
+  waiting for the saved result and VM stop. Add `wait RUN_ID` for an existing
+  run. Preserve asynchronous `submit` and existing JSON commands.
+- Print the final answer and file links to stdout; send run ID, progress, and
+  errors to stderr. Support `--json`. Return nonzero for blocked, failed,
+  timed-out, cancelled, or unknown outcomes. Ctrl-C stops local waiting and
+  prints the run ID; explicit `cancel` stops the cloud job. Never resubmit after
+  an uncertain launch. Stop waiting within a deadline even if records are absent.
+- Add optional `finish.response` for the full text answer, with `summary` as
+  fallback. Keep structured task data in `result`. Print the saved response
+  directly. Update both validators and the internal run schema together.
+- Add independent `--debug-agent` and `--debug-supervisor` filters over one
+  log reader. Preserve credential redaction and truncation markers. Start with
+  existing message/tool events. Text and tool-output deltas need a separate
+  worker change if finer streaming is required. Log delays must not determine
+  task completion or prevent retrieval of a saved result.
+- Extend `finish` with an explicit file list under a dedicated output directory.
+  Validate paths and limits before accepting finish; recheck before upload.
+  Reject links, paths outside that directory, and non-regular files. The agent
+  creates any requested ZIP. The supervisor uploads declared files before the
+  terminal record and cleanup, and records keys, names, sizes, and media types.
+  An upload failure must prevent success and preserve any uploaded files.
+- Store files under `runs/<run-id>/artifacts/`. Current S3 grants already allow
+  reads and writes within the run prefix. Keep report and binary size limits
+  separate; bound file count, total bytes, and upload time within the deadline.
+  Extend downloads to use the recorded file list and stream bytes to disk.
+- Generate private S3 HTTPS download links when displaying results. Save object
+  keys, not expiring links. Report link expiry and let `wait RUN_ID` create fresh
+  links later. Refresh signer credentials when needed: current assumed sessions
+  last one hour, and a long run can consume most of that period. AWS confirms
+  that [signed links expire with their signing credentials](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html).
+
+The first version can reuse the current AWS resources and run-scoped S3 access.
+It needs CLI, finish-tool, supervisor, image, and focused regression changes.
+Core checks: saved-result waiting, remote failure exit codes, interrupted waits,
+log filtering/redaction, file path and size limits, upload failure, and binary
+round-trip retrieval. Cloud validation needs a later approved run; no cloud
+test was run for this review. Keep the existing test environment deployed.
+
+The CLI still requires configured AWS access and local Terraform state. The
+current sandbox has open outbound access; Pi and its supervisor share a VM
+without an internal security boundary. This proposal does not change that model.
 
 ### Test scope
 
@@ -1674,17 +1740,6 @@ role chaining can limit later long jobs. Verify credential lifetime before launc
 Before implementation, resolve conflicting documented `runHookPayload` limits:
 16,384 bytes in prose versus 4,096 characters in the schema. Multiple signed URLs
 may reach this limit. Do not select this mechanism without checking payload size.
-
-## Resume checklist
-
-1. Read this file and the applicable `AGENTS.md` instructions.
-2. Inspect the workspace; preserve changes from other sessions.
-3. Confirm whether the request is planning, implementation, or deployment.
-4. Resolve the open decisions needed for that phase.
-5. Recheck AWS identity, region, service support, and permissions before cloud work.
-6. Read the design review checkpoint. Save agreed answers as the discussion
-   proceeds so compaction or a new session does not lose them. Keep unresolved
-   proposals separate. Record completed work only after verification.
 
 ## Sources
 

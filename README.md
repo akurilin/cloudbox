@@ -292,3 +292,14 @@ and the final check was clean. The finish-tool check then restored that
 environment and passed on worker image `3.0`. All 111 local tests pass. The
 test environment remains deployed; completed job VMs stopped; prod was not
 changed. The new multi-account lifecycle test has not yet been run against AWS.
+
+## Future work
+
+Goal: unattended tasks with durable results. Ideas for later:
+
+- Blocking `exec`/`wait`, final-answer output, and log filters.
+- Input attachments, output files, and fresh download links.
+- Longer runs with credential renewal.
+- Recovery for unknown results and cancellation.
+- Task validation commands, shared-resource locks, resume, and stronger security
+  boundaries.
