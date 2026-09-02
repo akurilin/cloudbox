@@ -1,5 +1,9 @@
 # Infrastructure
 
+Use `uv run python scripts/setup.py` from the repository root for end-to-end
+setup. It runs both Terraform stages, secret loading, image build and selection,
+and the cloud math check. The commands below are the separate manual path.
+
 One input file: `cloudbox.auto.tfvars.json`. Copy the example and keep the real
 file out of Git. Never put credentials or the OpenRouter key in it.
 
@@ -34,6 +38,7 @@ and the script. [Provider schema](https://github.com/hashicorp/terraform-provide
 
 After a cloud build, set `deployment.image_version` to its reported version.
 Review and apply the output change before submission. Never select `latest`.
+The setup entry point does these steps automatically after build success.
 `base_image_version: null` lets AWS choose the managed base during a build;
 the resulting worker image version is still selected explicitly.
 

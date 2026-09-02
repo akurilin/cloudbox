@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -41,6 +42,9 @@ MEMORY_SIZES = {512, 1024, 2048, 4096, 8192}
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 REQUEST_TIMEOUT_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 3600
+ROLE_READY_TIMEOUT_SECONDS = 120
+ROLE_READY_POLL_SECONDS = 5
+ROLE_READY_RETRY_CODES = {"AccessDenied", "AccessDeniedException"}
 MAX_KEY_RESPONSE_BYTES = 65_536
 MAX_INPUT_BYTES = 65_536
 ARN_PATTERN = re.compile(r"arn:aws:([a-z0-9-]+):([^:\s]*):([^:\s]*):")
@@ -213,6 +217,26 @@ def select_version(document, original, version):
         temporary.unlink(missing_ok=True)
 
 
+def wait_for_provisioner(config):
+    role_arn = json.loads(terraform(BOOTSTRAP_ROOT, "output", "-json", "provisioner_role_arn", capture=True))
+    if not isinstance(role_arn, str) or not role_arn.startswith(f"arn:aws:iam::{config['aws_account_id']}:role/"):
+        raise CloudboxError("invalid_role_output", "Bootstrap returned an invalid provisioner role ARN.")
+    deployment = {**config, "provisioner_role_arn": role_arn}
+    deadline = time.monotonic() + ROLE_READY_TIMEOUT_SECONDS
+    # New IAM trust can propagate after apply returns. Retry only this access check.
+    while time.monotonic() < deadline:
+        try:
+            operator_session(deployment)
+            return
+        except ClientError as error:
+            if error.operation_name != "AssumeRole" or error.response.get("Error", {}).get("Code") not in ROLE_READY_RETRY_CODES:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(ROLE_READY_POLL_SECONDS, remaining))
+    raise CloudboxError("provisioner_not_ready", f"The provisioner role still denies access after {ROLE_READY_TIMEOUT_SECONDS} seconds. Run setup again.")
+
+
 def main():
     stage = "preflight"
     try:
@@ -241,6 +265,10 @@ def main():
                 operator_session(config, provisioner=False)
                 terraform(directory, "init", "-input=false", "-no-color")
                 apply_stage(directory, plans / f"{stage}.tfplan", config)
+                if directory == BOOTSTRAP_ROOT:
+                    stage = "provisioner_readiness"
+                    print("Setup: wait for provisioner access", file=sys.stderr, flush=True)
+                    wait_for_provisioner(config)
             stage = "secret"
             deployment = load_deployment()
             session = operator_session(deployment)

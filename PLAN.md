@@ -1,19 +1,63 @@
 # Cloudbox plan
 
-Status: cloud-only math spike passed. Last reviewed: 2026-09-02.
+Status: clean-account setup test in progress. Last reviewed: 2026-09-02.
 
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
 and attachment, and three worker boundaries. The separately approved main apply
 created 14 items for storage, logs, the secret, and worker roles. The OpenRouter
 key was loaded into Secrets Manager without Terraform. The approved IAM
-corrections are applied. Image `cloudbox-worker` version `2.0` is selected and
-passed the cloud test. Its VM terminated; infrastructure remains deployed.
-AWS login alone does not authorize new deployment changes.
+corrections were applied. Image `cloudbox-worker` version `2.0` passed the first
+cloud test. The prior deployment has now been removed for the approved clean
+rebuild test. One-command setup is running. AWS login alone does not authorize
+new deployment changes.
 
 ## Current spike scope
 
 This section overrides the earlier v1 sequence and test requirements below.
+
+### One-command setup requirement
+
+The user now wants one entry point from no Cloudbox infrastructure to a deployment
+ready for jobs. Internal Terraform stages are acceptable; no manual image build,
+secret upload, or version selection between stages. Keep the separate IAM
+bootstrap because the main root uses its restricted role.
+
+Implement `uv run python scripts/setup.py`: check the Terraform input file, AWS
+access, and `.env` key; apply bootstrap and main infrastructure; load the key;
+build or reuse the matching image and wait; select its exact successful version;
+run the existing cloud math test. Report ready only after that test passes.
+Tools, AWS account/SSO configuration, and the two private input files remain
+prerequisites. The entry point must not install tools, create credentials, or
+delete an existing deployment. One confirmation or `--yes` covers its stages.
+
+The setup command may update `image_version` in the existing Terraform-owned
+input file after build success. Do not create a second configuration cache.
+This replaces Q19's manual selection step, not its exact-version pinning rule.
+Repeated setup should reuse a matching successful image. Interrupted setup must
+not require the user to copy intermediate values between commands.
+
+The requested infrastructure test removes only inventoried Cloudbox resources,
+checks their absence, then runs this entry point. Existing S3 data and logs would
+be lost; downloaded files and `.env` stay local. Immediate removal of the old
+secret needs explicit approval because normal deletion has a seven-day recovery
+window. The user approved deletion of the inventoried 20 Terraform items, one
+image, eight S3 objects, three log streams, and the secret without recovery,
+followed by rebuild and the math check. The image, eight objects, 14 main items,
+secret without recovery, and six bootstrap items were deleted. Exact-resource
+absence checks passed: both Terraform states were empty; the bucket, four roles,
+four policies, log group, secret by ARN and name, and image were absent. All 13
+AWS checks passed. The first `uv run python scripts/setup.py --yes` attempt
+created six bootstrap items, then stopped: AWS rejected AssumeRole before the
+new role was ready. Main infrastructure was not created. A later read-only STS
+check succeeded without any policy change. Setup now retries only this role
+access check for up to 120 seconds. The six bootstrap items were removed again;
+repeat absence checks before the next attempt. Local inputs, state files, and
+the downloaded result remain.
+Do not claim that AWS-managed account resources or retained service history
+are removed.
+
+### Cloud execution scope
 
 - Build and run the worker only in AWS. No local simulation or storage adapter.
 - Use one end-to-end test: submit a math prompt, let Pi write

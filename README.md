@@ -50,6 +50,7 @@ Setup checks configuration, saved state, AWS identity, and OpenRouter key access
 before writes. It then:
 
 1. Plans and applies IAM bootstrap and infrastructure in separate Terraform roots.
+   Waits for the new provisioner role to allow access before the second stage.
 2. Stores the key directly in Secrets Manager, outside Terraform state and logs.
 3. Builds the worker image, or reuses a matching successful version.
 4. Saves that exact version in `deployment.image_version` in the existing input
