@@ -27,6 +27,11 @@ ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 ZIP_CONTENT_TYPE = "application/zip"
 IMAGE_OWNER = "CloudboxImageScript"
 VERSION_COMPLETE = {"SUCCESSFUL", "FAILED", "DELETED", "DELETE_FAILED"}
+VERSION_PENDING = {"PENDING", "IN_PROGRESS"}
+IMAGE_MISSING = "ResourceNotFoundException"
+BUILD_SETTING_FIELDS = (
+    "baseImageArn", "buildRoleArn", "codeArtifact", "cpuConfigurations", "resources", "hooks", "logging",
+)
 
 
 def source_archive():
@@ -62,10 +67,122 @@ def wait_for_version(client, image_arn, version):
         time.sleep(POLL_SECONDS)
 
 
+def image_request(deployment, artifact):
+    digest = hashlib.sha256(artifact).hexdigest()
+    key = f"{deployment['image_source_prefix']}{digest}/source.zip"
+    request = {
+        "baseImageArn": deployment["base_image_arn"],
+        "buildRoleArn": deployment["build_role_arn"],
+        "codeArtifact": {"uri": f"s3://{deployment['bucket_name']}/{key}"},
+        "cpuConfigurations": [{"architecture": deployment["architecture"]}],
+        "resources": [{"minimumMemoryInMiB": deployment["memory_mib"]}],
+        "hooks": {"port": HOOK_PORT,
+                  "microvmHooks": {"run": "ENABLED", "runTimeoutInSeconds": RUN_HOOK_TIMEOUT_SECONDS},
+                  "microvmImageHooks": {"ready": "ENABLED", "readyTimeoutInSeconds": READY_HOOK_TIMEOUT_SECONDS}},
+        "logging": {"cloudWatch": {"logGroup": deployment["log_group_name"], "logStream": f"build-{digest}"}},
+        "description": f"Cloudbox source {digest}",
+    }
+    if deployment.get("base_image_version"):
+        request["baseImageVersion"] = deployment["base_image_version"]
+    return request, key
+
+
+def owned_image(client, image_arn):
+    try:
+        image = client.get_microvm_image(imageIdentifier=image_arn)
+    except ClientError as error:
+        if error.response["Error"]["Code"] == IMAGE_MISSING:
+            return None
+        raise
+    if image.get("state") == "DELETED":
+        return None
+    if image.get("tags", {}).get("ManagedBy") != IMAGE_OWNER:
+        raise CloudboxError("image_owner_mismatch", "The image is not owned by this script.")
+    return image
+
+
+def start_build(client, session, deployment, artifact, request, key, *, create):
+    # Identical archives use one key; no runtime secret enters the build request.
+    session.client("s3", config=SDK_CONFIG).put_object(
+        Bucket=deployment["bucket_name"], Key=key, Body=artifact,
+        ServerSideEncryption=S3_ENCRYPTION, ContentType=ZIP_CONTENT_TYPE,
+    )
+    request = {**request, "clientToken": str(uuid.uuid4())}
+    if create:
+        return client.create_microvm_image(
+            **request, name=deployment["image_name"],
+            tags={"Project": deployment["project_name"], "ManagedBy": IMAGE_OWNER},
+        )
+    return client.update_microvm_image(**request, imageIdentifier=deployment["image_arn"])
+
+
+def ready_version(client, image_arn, version, *, wait):
+    response = client.get_microvm_image_version(imageIdentifier=image_arn, imageVersion=version)
+    if response.get("state") in VERSION_PENDING:
+        if not wait:
+            raise CloudboxError("build_pending", "The image build is still running.",
+                                image_arn=image_arn, image_version=version)
+        response = wait_for_version(client, image_arn, version)
+    if response.get("state") != "SUCCESSFUL" or response.get("status") != "ACTIVE":
+        raise CloudboxError("image_not_ready", "The matching image build is not successful and active.",
+                            image_arn=image_arn, image_version=version,
+                            state=response.get("state"), status=response.get("status"))
+    return response
+
+
+def ensure_image(deployment, session=None, *, wait=True):
+    """Reuse or build the current worker; return its successful, active version."""
+    session = session or operator_session(deployment)
+    client = session.client(MICROVM_SERVICE, config=SDK_CONFIG)
+    artifact = source_archive()
+    request, key = image_request(deployment, artifact)
+    image_arn = deployment["image_arn"]
+    image = owned_image(client, image_arn)
+    if image is not None:
+        fields = (*BUILD_SETTING_FIELDS, "baseImageVersion") if "baseImageVersion" in request else BUILD_SETTING_FIELDS
+        matching = []
+        page_request = {"imageIdentifier": image_arn}
+        while True:
+            page = client.list_microvm_image_versions(**page_request)
+            matching.extend(version for version in page.get("items", [])
+                            if all(version.get(field) == request[field] for field in fields)
+                            and version.get("state") not in {"DELETED", "DELETING"})
+            if not page.get("nextToken"):
+                break
+            page_request["nextToken"] = page["nextToken"]
+        # A prior response can be lost. Inspect matching versions before another build.
+        for version in matching:
+            if version.get("state") == "SUCCESSFUL" and version.get("status") == "ACTIVE":
+                return ready_version(client, image_arn, version["imageVersion"], wait=wait)
+        for version in matching:
+            if version.get("state") in VERSION_PENDING:
+                return ready_version(client, image_arn, version["imageVersion"], wait=wait)
+        if matching:
+            # Do not repeat a failed build on each setup run. An explicit update can retry it.
+            return ready_version(client, image_arn, matching[0]["imageVersion"], wait=wait)
+        if image.get("state") in {"CREATING", "UPDATING", "DELETING"}:
+            raise CloudboxError("image_busy", "An unmatched image operation is still running.", image_arn=image_arn)
+    response = start_build(client, session, deployment, artifact, request, key, create=image is None)
+    return ready_version(client, image_arn, response["imageVersion"], wait=wait)
+
+
+def wait_for_deletion(client, image_arn):
+    deadline = time.monotonic() + BUILD_WAIT_SECONDS
+    while True:
+        image = owned_image(client, image_arn)
+        if image is None or image.get("state") == "DELETED":
+            return
+        if image.get("state") == "DELETE_FAILED":
+            raise CloudboxError("image_delete_failed", "AWS could not delete the image.", image_arn=image_arn)
+        if time.monotonic() >= deadline:
+            raise CloudboxError("image_delete_pending", "The image deletion is still running.", image_arn=image_arn)
+        time.sleep(POLL_SECONDS)
+
+
 def main():
     try:
         parser = argparse.ArgumentParser(description="Manage the script-owned MicroVM image.")
-        parser.add_argument("action", choices=("create", "update", "status", "delete"))
+        parser.add_argument("action", choices=("create", "update", "ensure", "status", "delete"))
         parser.add_argument("--wait", action="store_true")
         parser.add_argument("--version")
         parser.add_argument("--confirm-name")
@@ -76,6 +193,10 @@ def main():
         session = operator_session(deployment)
         client = session.client(MICROVM_SERVICE, config=SDK_CONFIG)
         image_arn = deployment["image_arn"]
+        if arguments.action == "ensure":
+            response = ensure_image(deployment, session, wait=arguments.wait)
+            emit({"ok": True, **version_summary(response), "selected_for_runs": False})
+            return 0
         if arguments.action == "status":
             response = client.get_microvm_image(imageIdentifier=image_arn)
             version = arguments.version
@@ -88,48 +209,31 @@ def main():
         if arguments.action == "delete":
             if arguments.confirm_name != deployment["image_name"]:
                 raise CloudboxError("confirmation_required", "Pass --confirm-name with the configured image name.")
-            image = client.get_microvm_image(imageIdentifier=image_arn)
-            if image.get("tags", {}).get("ManagedBy") != IMAGE_OWNER:
-                raise CloudboxError("image_owner_mismatch", "The image is not owned by this script.")
+            image = owned_image(client, image_arn)
+            if image is None:
+                emit({"ok": True, "image_arn": image_arn, "state": "DELETED", "source_archives_retained": True})
+                return 0
             request = {"imageIdentifier": image_arn}
             while True:
                 page = client.list_microvms(**request)
-                if any(item.get("state") != "TERMINATED" for item in page.get("microvms", [])):
+                if any(item.get("state") != "TERMINATED" for item in page.get("items", [])):
                     raise CloudboxError("image_in_use", "Stop the image's active VMs before deletion.")
                 if not page.get("nextToken"):
                     break
                 request["nextToken"] = page["nextToken"]
-            client.delete_microvm_image(imageIdentifier=image_arn)
-            emit({"ok": True, "image_arn": image_arn, "delete_requested": True, "source_archives_retained": True})
+            if image.get("state") != "DELETING":
+                client.delete_microvm_image(imageIdentifier=image_arn)
+            if arguments.wait:
+                wait_for_deletion(client, image_arn)
+            emit({"ok": True, "image_arn": image_arn, "delete_requested": True,
+                  "deletion_complete": arguments.wait, "source_archives_retained": True})
             return 0
         artifact = source_archive()
-        digest = hashlib.sha256(artifact).hexdigest()
-        key = f"{deployment['image_source_prefix']}{digest}/source.zip"
-        session.client("s3", config=SDK_CONFIG).put_object(
-            Bucket=deployment["bucket_name"], Key=key, Body=artifact,
-            ServerSideEncryption=S3_ENCRYPTION, ContentType=ZIP_CONTENT_TYPE,
-        )
-        request = {
-            "baseImageArn": deployment["base_image_arn"],
-            "buildRoleArn": deployment["build_role_arn"],
-            "codeArtifact": {"uri": f"s3://{deployment['bucket_name']}/{key}"},
-            "cpuConfigurations": [{"architecture": deployment["architecture"]}],
-            "resources": [{"minimumMemoryInMiB": deployment["memory_mib"]}],
-            "hooks": {"port": HOOK_PORT,
-                      "microvmHooks": {"run": "ENABLED", "runTimeoutInSeconds": RUN_HOOK_TIMEOUT_SECONDS},
-                      "microvmImageHooks": {"ready": "ENABLED", "readyTimeoutInSeconds": READY_HOOK_TIMEOUT_SECONDS}},
-            "logging": {"cloudWatch": {"logGroup": deployment["log_group_name"], "logStream": f"build-{digest}"}},
-            "description": f"Cloudbox source {digest}", "clientToken": str(uuid.uuid4()),
-        }
-        if deployment.get("base_image_version"):
-            request["baseImageVersion"] = deployment["base_image_version"]
-        if arguments.action == "create":
-            request["name"] = deployment["image_name"]
-            request["tags"] = {"Project": deployment["project_name"], "ManagedBy": IMAGE_OWNER}
-            response = client.create_microvm_image(**request)
-        else:
-            request["imageIdentifier"] = image_arn
-            response = client.update_microvm_image(**request)
+        request, key = image_request(deployment, artifact)
+        if arguments.action == "update" and owned_image(client, image_arn) is None:
+            raise CloudboxError("image_missing", "Create the image before an explicit update.")
+        response = start_build(client, session, deployment, artifact, request, key,
+                               create=arguments.action == "create")
         version = response["imageVersion"]
         if arguments.wait:
             response = wait_for_version(client, image_arn, version)

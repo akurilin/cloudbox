@@ -29,31 +29,42 @@ The CLI reads Terraform outputs in memory. It does not keep a configuration cach
 Keep the OpenRouter key in the ignored `.env` file until secret setup. Do not put
 it in Terraform variables. Worker images contain no runtime keys or task prompts.
 
-## Run the spike
+## Setup
 
-Requirements: Python 3.12 or later, uv, Terraform, AWS CLI, and an active SSO login.
-
-```sh
-uv sync
-aws sso login --profile AdministratorAccess-618170664907
-```
-
-Follow [infra/README.md](infra/README.md) to plan and apply the two Terraform roots.
-Review changes before apply. The bootstrap creates the restricted provisioner;
-the main root creates storage, logs, secret metadata, and worker roles.
-
-After approved infrastructure deployment:
+Requirements: Python 3.12 or later, uv, Terraform, and AWS CLI. First log in with
+`aws sso login --profile YOUR_CONFIGURED_PROFILE`.
+Use a separate AWS account with administrator access for the initial bootstrap.
+Copy `infra/cloudbox.auto.tfvars.example.json` to `infra/cloudbox.auto.tfvars.json`,
+then set its account, region, SSO profile, and project name. Leave `image_version`
+empty. Put the OpenRouter key in `.env` as `OPENROUTER_API_KEY=...` or one raw key.
 
 ```sh
-uv run python scripts/set_secret.py --env-file .env
-uv run python scripts/build_image.py create --wait
+uv run python scripts/setup.py
 ```
 
-Set `deployment.image_version` in the ignored Terraform input file to the reported
-`imageVersion`. Review and apply this output change. The build does not select
-itself. Use `update --wait` for later builds, not another `create`.
+Setup confirms the account and region, then asks for one approval. For unattended
+setup, use `uv run python scripts/setup.py --yes`; this approves all stages.
+The command does not install tools, create credentials, or log in to AWS.
 
-After deployment and image selection:
+Setup checks configuration, saved state, AWS identity, and OpenRouter key access
+before writes. It then:
+
+1. Plans and applies IAM bootstrap and infrastructure in separate Terraform roots.
+2. Stores the key directly in Secrets Manager, outside Terraform state and logs.
+3. Builds the worker image, or reuses a matching successful version.
+4. Saves that exact version in `deployment.image_version` in the existing input
+   file, then applies the output-only change.
+5. Runs the existing cloud math check and reports `ready: true` only after it passes.
+
+Setup rejects state from another account or region and plans that delete or
+replace resources. Use separate local state for another deployment. It never
+destroys infrastructure. If a stage fails, correct the reported error and run
+setup again. Terraform retains completed resources; matching image builds are
+reused. Each completed setup attempt runs a new cloud check and incurs its costs.
+
+See [infra/README.md](infra/README.md) for the separate manual steps. Image commands
+still work separately; only setup selects a successful version automatically.
+To repeat only the cloud check after setup:
 
 ```sh
 uv run python scripts/smoke_cloud.py
