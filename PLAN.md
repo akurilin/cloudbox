@@ -1,15 +1,15 @@
 # Cloudbox plan
 
-Status: cloud-only spike implementation in progress. Last reviewed: 2026-09-02.
+Status: cloud-only math spike passed. Last reviewed: 2026-09-02.
 
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
 and attachment, and three worker boundaries. The separately approved main apply
 created 14 items for storage, logs, the secret, and worker roles. The OpenRouter
 key was loaded into Secrets Manager without Terraform. The approved IAM
-corrections are applied. Image `cloudbox-worker` version `1.0` built successfully.
-The first cloud test exposed a listener bug and its VM terminated. Version `2.0`
-is building with the correction. AWS login alone does not authorize deployment.
+corrections are applied. Image `cloudbox-worker` version `2.0` is selected and
+passed the cloud test. Its VM terminated; infrastructure remains deployed.
+AWS login alone does not authorize new deployment changes.
 
 ## Current spike scope
 
@@ -38,12 +38,38 @@ Anthropic inference integration is part of this spike.
 
 Implementation files now cover Terraform, the Pi worker, the CLI, image builds,
 secret setup, and one cloud smoke test. Terraform validation, Python compilation,
-and shell syntax checks passed. The real cloud test has run but has not passed.
+and shell syntax checks passed. The real cloud test passed with
+`uv run python scripts/smoke_cloud.py`.
+
+### Verified cloud result
+
+- Run: `c9be3807-0acc-4fac-adfb-8974592e4b57`.
+- Image: `cloudbox-worker:2.0`; Pi `0.84.4`; OpenRouter `z-ai/glm-5.3`.
+- Shared allocation: ARM64, 1,024 MiB memory; AWS manages other allocation.
+- Prompt: calculate `(12345 * 6789) + 98765` and write JSON.
+- Downloaded output: `{"answer": 83908970}`; independent calculation matched.
+- Supervisor status: `succeeded`; Pi exit code: `0`; artifact upload confirmed.
+- AWS compute state: `TERMINATED`, before the 600-second deadline.
+- Image inventory: both test VMs terminated; no active Cloudbox VMs remain.
+- CloudWatch received model/tool and supervisor events, including shutdown.
+- Local result: `.cloudbox/smoke/c9be3807-0acc-4fac-adfb-8974592e4b57/output/result.json`.
+
+The test downloads only after compute stops. The result therefore outlives its
+VM. One tool call failed; Pi recovered and completed the task. The logs contain
+metadata, not tool content. This pass does not prove hostile-agent isolation or
+all CLI failure paths. Review found that cancellation can remain `unknown` if
+AWS stops after the CLI's immediate state check; defer recovery to later work.
+
+The runtime role reads the OpenRouter secret and can terminate project VMs; it
+has no S3 or AssumeRole access. The CLI supplies a separate one-hour STS session
+restricted to this run's S3 prefix. The cloud test verified normal access, not
+cross-run denial. The trusted CLI reuses the restricted provisioner role.
+The image script owns image builds; Terraform owns the remaining infrastructure.
 
 Cloud test run `97bb7c8b-867e-4a05-8ccc-62394174756e` ended with no result record.
 AWS reported a run-hook HTTP 400 and terminated the VM. The listener assumed an
-`mvm-` ID prefix; AWS returned `microvm-...`. Remove the prefix assumption and
-retry the same cloud test after selecting corrected image version `2.0`.
+`mvm-` ID prefix; AWS returned `microvm-...`. The listener now accepts opaque
+IDs. The same cloud test passed after selecting corrected image version `2.0`.
 
 Image creation returned `AccessDeniedException`. Read-only checks found two
 MicroVM IAM constraints. A saved bootstrap plan updates only the provisioner

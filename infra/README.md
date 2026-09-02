@@ -47,6 +47,10 @@ requires wildcard resource scope for `lambda:PassNetworkConnector`; this grant
 is limited to the configured region and is not given to workers. The CLI still
 sets `NO_INGRESS` explicitly.
 
+Initial image creation also needs `lambda:TagResource` on `*`. That grant requires
+the configured region and exact Project/ManagedBy tags. It can tag other Lambda
+resources with those values; workers do not receive it.
+
 IAM boundaries do not protect the worker from its own agent. The runtime role
 can read the OpenRouter key and terminate other runs of the same project image.
 

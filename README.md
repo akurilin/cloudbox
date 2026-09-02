@@ -11,8 +11,10 @@ CLI -> new MicroVM -> Pi -> OpenRouter
              +-> S3 results + CloudWatch metadata -> stop VM
 ```
 
-The one end-to-end test submits a calculation, waits for termination, downloads
-the JSON file, and checks its answer. Cloud execution has not been verified yet.
+The one end-to-end test passed on 2026-09-02 with image `2.0` and Pi `0.84.4`.
+It submitted `(12345 * 6789) + 98765`, downloaded `{"answer": 83908970}` after
+termination, and checked the answer. CloudWatch received the run metadata.
+Run ID: `c9be3807-0acc-4fac-adfb-8974592e4b57`.
 
 ## Configuration
 
@@ -94,6 +96,8 @@ an existing destination. Saved partial outputs remain available after failure.
   spike maximum is 3,300 seconds because run-file credentials last one hour.
 - The prompt limit is 128,000 characters; the result limit is 1 MiB.
 - Run data and logs expire after 30 days. Deletion is not immediate at that age.
+- Cancellation can leave an `unknown` outcome if AWS stops the VM after the
+  CLI's immediate state check. Cancellation recovery is not yet tested.
 - No uploads, resume, local simulation, custom environments, or extra test suite.
 
 S3, logs, secret metadata, and IAM use Terraform. MicroVM image hooks are not yet
