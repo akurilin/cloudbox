@@ -1,69 +1,77 @@
 # Infrastructure
 
-Use `uv run python scripts/setup.py` from the repository root for end-to-end
-setup. It runs both Terraform stages, secret loading, image build and selection.
-It does not submit jobs. The commands below are the separate manual path.
-
-One input file: `cloudbox.auto.tfvars.json`. Copy the example and keep the real
-file out of Git. Never put credentials or the OpenRouter key in it.
-
-The secret setup helper uses the provisioner to write the key directly to
-Secrets Manager. The provisioner cannot read it. Terraform stores metadata only.
-
-Two Terraform roots keep the provisioner from changing its own access:
-
-- `bootstrap/`: approved SSO administrator setup; owns provisioner and boundaries.
-- This directory: restricted provisioner; owns bucket, logs, secret metadata,
-  and worker roles. Each root has separate local state.
-
-Run from the repository root, after SSO login. Plans are read-only. Review each
-plan and obtain approval before its apply command.
+Use the wrappers from the repository root. They select configuration, local
+backend state, and Terraform working data together. Do not switch accounts with
+raw `terraform apply` or workspace selection.
 
 ```sh
-terraform -chdir=infra/bootstrap init
-terraform -chdir=infra/bootstrap plan -var-file=../cloudbox.auto.tfvars.json -out=bootstrap.tfplan
-terraform -chdir=infra/bootstrap apply bootstrap.tfplan
-terraform -chdir=infra init
-terraform -chdir=infra plan -out=cloudbox.tfplan
-terraform -chdir=infra apply cloudbox.tfplan
+uv run python scripts/check_resources.py --env test --require-clean
+uv run python scripts/setup.py --env test
+uv run python scripts/teardown.py --env test --force-delete-secret
+uv run python scripts/check_resources.py --env test --require-clean
 ```
 
-Do not use either state with another account or region. Make a separate
-deployment and state. `allowed_account_ids` rejects the wrong account.
+Setup prepares infrastructure only. The separate `scripts/e2e_cloud.py --env test`
+command tests setup, a real job, and teardown. See [usage](../README.md).
 
-The image build script owns the MicroVM image and archives. Provider 6.62.0 has
-an image resource but lacks hook, memory, and logging fields. It cannot enable
-the required `/run` hook. Do not split ownership of one image between Terraform
-and the script. [Provider schema](https://github.com/hashicorp/terraform-provider-aws/blob/v6.62.0/internal/service/lambdamicrovms/image.go).
+## Ownership and state
 
-After a cloud build, set `deployment.image_version` to its reported version.
-Review and apply the output change before submission. Never select `latest`.
-The setup entry point does these steps automatically after build success.
-`base_image_version: null` lets AWS choose the managed base during a build;
-the resulting worker image version is still selected explicitly.
+Each environment reuses these Terraform roots:
 
-The runtime role has no S3 or AssumeRole grant. The CLI passes a separate data
-session restricted to the run prefix. Chained STS sessions last at most one hour;
-the spike limits runs to 3,300 seconds to leave launch margin.
+- `bootstrap/`: SSO administrator; provisioner role and permission boundaries.
+- This directory: restricted provisioner; storage, logs, secret metadata, workers.
+- `modules/policy/`: shared names, permissions, and resource inventory contract.
 
-MicroVM calls do not supply usable `iam:PassedToService` context. The provisioner
-can pass only the exact build/runtime roles, without that condition. AWS also
-requires wildcard resource scope for `lambda:PassNetworkConnector`; this grant
-is limited to the configured region and is not given to workers. The CLI still
-sets `NO_INGRESS` explicitly.
+`test` and `prod` use separate local backend paths and `TF_DATA_DIR` directories
+under `.cloudbox/environments/<env>/`. Inputs live in
+`infra/environments/<env>.tfvars.json`. Keep inputs and state backups private.
+The wrappers check account identity and reject state from another account or
+region. There is no shared state or deployment-output cache.
 
-Initial image creation also needs `lambda:TagResource` on `*`. That grant requires
-the configured region and exact Project/ManagedBy tags. It can tag other Lambda
-resources with those values; workers do not receive it.
+`--env legacy` retains the existing `infra/cloudbox.auto.tfvars.json` input and
+the two original state paths. Its working directory is also isolated. Do not
+copy that state to `test` or `prod`. Generated directories link shared Terraform
+source files; they never link another environment's variable or state files.
 
-IAM boundaries do not protect the worker from its own agent. The runtime role
-can read the OpenRouter key and terminate other runs of the same project image.
+Terraform owns no secret value. The setup helper writes the OpenRouter key
+directly to Secrets Manager. The image script owns MicroVM images and source
+archives: the pinned AWS provider lacks the hook, memory, and logging fields
+needed by this worker. Setup selects an exact successful image version.
 
-Run objects and logs expire after 30 days. The new bucket never enables
-versioning. No VPC, NAT gateway, inbound endpoint access, or private ECR is added.
+## Resource checks
 
-Use `uv run python scripts/teardown.py` for approved deletion; `--plan` previews it.
-See [deletion options](../README.md#delete-the-deployment). The script removes
-VMs, the image, and bucket data before Terraform destroys main and bootstrap.
-Keep `force_destroy` disabled. Secret recovery is seven days unless explicitly
-disabled with `--force-delete-secret`.
+Terraform state records managed objects; it is not an account inventory.
+The shared checker evaluates the Terraform inventory contract and calls AWS
+to check the project resources, including script-owned compute and bucket data.
+Setup refuses untracked conflicts. Teardown refuses unknown deletion targets.
+The full test requires clean checks before setup and after teardown.
+
+When adding infrastructure, update its Terraform inventory entry and any new
+AWS checker adapter. Coverage checks must pass for configuration, state, and
+plans. Child settings, policies, log streams, and image versions disappear with
+their checked parent resources.
+
+Checks cover the configured project's supported resource types in the selected
+region, plus IAM. They do not inventory every AWS service or erase AWS defaults,
+SSO access, or retained VM history. Teardown keeps the bucket's `force_destroy`
+disabled and explicitly empties it only after compute stops. Normal secret
+deletion retains seven-day recovery; the full test explicitly removes recovery.
+
+## Access limits
+
+Worker permissions remain unchanged. The runtime role has no S3 or AssumeRole
+grant. Each run gets a separate, prefix-scoped S3 session. Chained credentials
+last at most one hour, so the spike limits runs to 3,300 seconds.
+
+MicroVM role passing lacks usable `iam:PassedToService` context; only the exact
+build/runtime roles can be passed. Connector passing and initial image tags need
+region-limited wildcard grants. These grants are not given to workers.
+
+Pi and the supervisor share a VM. The runtime can read the model key and stop
+sibling runs of the same image. Internal hardening remains deferred. No VPC,
+NAT gateway, public inbound endpoint, or private ECR is created.
+
+References: [local backends](https://developer.hashicorp.com/terraform/language/backend/local),
+[Terraform working data](https://developer.hashicorp.com/terraform/cli/config/environment-variables#tf_data_dir),
+[destroy scope](https://developer.hashicorp.com/terraform/cli/commands/destroy),
+[provider fields](https://github.com/hashicorp/terraform-provider-aws/blob/v6.62.0/internal/service/lambdamicrovms/image.go).

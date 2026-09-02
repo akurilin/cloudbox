@@ -17,6 +17,7 @@ from .common import (
     operator_session, parse_timeout, put_record, run_prefix,
     scoped_data_credentials, timestamp, validate_spec,
 )
+from .environments import add_environment_argument, get_environment
 
 LIST_PAGE_SIZE = 20
 MAX_LIST_PAGE_SIZE = 100
@@ -45,6 +46,7 @@ def run_id(value):
 
 def build_parser():
     parser = Parser(prog="cloudbox")
+    add_environment_argument(parser)
     commands = parser.add_subparsers(dest="command", required=True)
     submit = commands.add_parser("submit", help="Start one cloud run.")
     submit.add_argument("prompt", nargs="?")
@@ -97,8 +99,9 @@ def input_spec(arguments):
 
 
 class Runs:
-    def __init__(self, deployment):
+    def __init__(self, deployment, environment):
         self.deployment = deployment
+        self.environment = environment
         self.session = operator_session(deployment)
         self.s3 = self.session.client("s3", config=SDK_CONFIG)
         self.compute = self.session.client(MICROVM_SERVICE, config=SDK_CONFIG)
@@ -232,7 +235,7 @@ class Runs:
 
     def download(self, identity, directory):
         status = self.status(identity)
-        target = (directory or Path.cwd() / "downloads" / identity).expanduser().resolve()
+        target = (directory or Path.cwd() / "downloads" / self.environment.name / identity).expanduser().resolve()
         if target.exists():
             raise CloudboxError("destination_exists", "Use a new download directory.")
         # Fixed relative names exclude S3-controlled paths and directory traversal.
@@ -272,7 +275,7 @@ class Runs:
                 response = {"events": [], "nextForwardToken": token}
             next_token = response.get("nextForwardToken")
             for event in response.get("events", []):
-                emit({"ok": True, "run_id": identity, "event": event})
+                emit({"ok": True, "environment": self.environment.name, "run_id": identity, "event": event})
             drained = next_token == token
             token = next_token
             if not follow and drained:
@@ -283,14 +286,15 @@ class Runs:
                 if settled >= LOG_SETTLE_POLLS:
                     break
                 time.sleep(LOG_POLL_SECONDS)
-        emit({"ok": True, "run_id": identity, "end_of_stream": True})
+        emit({"ok": True, "environment": self.environment.name, "run_id": identity, "end_of_stream": True})
 
 
 def main(argv=None):
     try:
         arguments = build_parser().parse_args(argv)
         supplied = input_spec(arguments) if arguments.command == "submit" else None
-        runs = Runs(load_deployment())
+        environment = get_environment(arguments.env)
+        runs = Runs(load_deployment(environment), environment)
         if arguments.command == "submit":
             result = runs.submit(supplied)
         elif arguments.command == "list":
@@ -304,7 +308,7 @@ def main(argv=None):
         else:
             runs.logs(arguments.run_id, arguments.follow)
             return 0
-        emit(result)
+        emit({"environment": environment.name, **result})
         return 0
     except (CloudboxError, BotoCoreError, ClientError, OSError, ValueError, KeyError) as error:
         emit(error_record(error))

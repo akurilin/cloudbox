@@ -16,6 +16,7 @@ from cloudbox.common import (
     ROOT, MICROVM_SERVICE, SDK_CONFIG, S3_ENCRYPTION, CloudboxError,
     emit, error_record, load_deployment, operator_session,
 )
+from cloudbox.environments import add_environment_argument, get_environment
 
 SOURCE_NAMES = ("Dockerfile", "listener.py", "supervisor.py", "requirements.txt", "startup.sh", "teardown.sh")
 HOOK_PORT = 8080
@@ -179,17 +180,18 @@ def wait_for_deletion(client, image_arn):
         time.sleep(POLL_SECONDS)
 
 
-def main():
+def main(argv=None):
     try:
         parser = argparse.ArgumentParser(description="Manage the script-owned MicroVM image.")
+        add_environment_argument(parser)
         parser.add_argument("action", choices=("create", "update", "ensure", "status", "delete"))
         parser.add_argument("--wait", action="store_true")
         parser.add_argument("--version")
         parser.add_argument("--confirm-name")
-        arguments = parser.parse_args()
+        arguments = parser.parse_args(argv)
         if arguments.action == "status" and arguments.wait and not arguments.version:
             raise CloudboxError("version_required", "Use --version when waiting for an image build.")
-        deployment = load_deployment()
+        deployment = load_deployment(get_environment(arguments.env))
         session = operator_session(deployment)
         client = session.client(MICROVM_SERVICE, config=SDK_CONFIG)
         image_arn = deployment["image_arn"]

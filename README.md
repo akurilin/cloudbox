@@ -1,146 +1,149 @@
 # Cloudbox spike
 
-Run Pi with GLM 5.3 (`z-ai/glm-5.3`) on OpenRouter in a short-lived AWS Lambda
-MicroVM. This is a cloud-only spike, not a production agent platform. There is
-no local worker simulation or Claude Code integration.
+Run Pi with GLM 5.3 (`z-ai/glm-5.3`) through OpenRouter in an AWS Lambda
+MicroVM. This is a cloud-only spike, not a production agent platform.
 
 ```text
-CLI -> new MicroVM -> Pi -> OpenRouter
-             |        |
-             |        +-> output/result.json
-             +-> S3 results + CloudWatch metadata -> stop VM
+CLI -> MicroVM -> Pi -> OpenRouter
+          |
+          +-> S3 result + CloudWatch events -> stop VM
 ```
 
-The clean-deployment test passed on 2026-09-02 with image `1.0` and Pi `0.84.4`.
-The cloud math check downloaded `{"answer": 83908970}` after VM termination.
-Run ID: `e32a9407-5b57-44a6-8794-8465491bb9db`. Setup and job testing are now separate.
+## Environments
 
-## Configuration
+Use one repository with separate credentials, configuration, and Terraform state.
+Every command requires `--env`; there is no default account.
 
-Use `infra/cloudbox.auto.tfvars.json` for the account, region, SSO profile, image
-version, and shared settings. This file is ignored by Git. The checked-in example
-shows its shape. Terraform state stays local and is also ignored.
+| Environment | AWS account | SSO profile |
+| --- | --- | --- |
+| `test` | `783951396681` | `cloudbox-test` |
+| `prod` | `968438785594` | `cloudbox-prod` |
+| `legacy` | `618170664907` | `AdministratorAccess-618170664907` |
 
-The selected account is `618170664907` in `us-east-1`. A different account needs
-separate state; do not reuse an old deployment's state with new credentials.
-The CLI reads Terraform outputs in memory. It does not keep a configuration cache.
+Resources use `us-east-1`. The existing SSO session, `my-sso`, uses `us-west-1`.
+The `legacy` option retains access to the old management-account deployment.
+It does not migrate its data or state.
 
-Keep the OpenRouter key in the ignored `.env` file until secret setup. Do not put
-it in Terraform variables. Worker images contain no runtime keys or task prompts.
+Non-secret inputs live in `infra/environments/<env>.tfvars.json`. Each environment
+has separate bootstrap and main state under `.cloudbox/environments/<env>/`.
+Keep these local files out of Git and back them up. Never change the account or
+region of an existing state. The CLI reads selected Terraform outputs in memory.
+Generated working directories link to the shared Terraform source; they do not
+copy configuration or state from another environment.
 
 ## Setup
 
-Requirements: Python 3.12 or later, uv, Terraform, and AWS CLI. First log in with
-`aws sso login --profile YOUR_CONFIGURED_PROFILE`.
-Use a separate AWS account with administrator access for the initial bootstrap.
-Copy `infra/cloudbox.auto.tfvars.example.json` to `infra/cloudbox.auto.tfvars.json`,
-then set its account, region, SSO profile, and project name. Leave `image_version`
-empty. Put the OpenRouter key in `.env` as `OPENROUTER_API_KEY=...` or one raw key.
+Requirements: Python 3.12+, uv, Terraform, AWS CLI, and SSO administrator access.
+For a new checkout, copy the selected `infra/environments/*.tfvars.example.json`
+to the corresponding `*.tfvars.json` path. Keep the OpenRouter key in
+`.env.test` or `.env.prod` as `OPENROUTER_API_KEY=...`; these files are ignored.
+Use `--env-file .env` to select the existing shared key explicitly.
 
 ```sh
-uv run python scripts/setup.py
+aws sso login --profile cloudbox-test
+uv run python scripts/setup.py --env test
 ```
 
-Setup confirms the account and region, then asks for one approval. For unattended
-setup, use `uv run python scripts/setup.py --yes`; this approves all stages.
-The command does not install tools, create credentials, or log in to AWS.
+For `prod`, use its profile and `--env prod`. Setup asks for one approval;
+`--yes` skips the prompt. It checks the account, state, resources, and key, then:
 
-Setup checks configuration, saved state, AWS identity, and OpenRouter key access
-before writes. It then:
+1. Applies IAM bootstrap and infrastructure.
+2. Loads the key into Secrets Manager, outside Terraform state.
+3. Builds or reuses a matching worker image and waits for completion.
+4. Saves the exact image version in the selected input file and Terraform output.
 
-1. Plans and applies IAM bootstrap and infrastructure in separate Terraform roots.
-   Waits for the new provisioner role to allow access before the second stage.
-2. Stores the key directly in Secrets Manager, outside Terraform state and logs.
-3. Builds the worker image, or reuses a matching successful version.
-4. Saves that exact version in `deployment.image_version` in the existing input
-   file, then applies the output-only change.
+Setup reports `ready: true`. It does not submit jobs or call a model. AWS charges
+apply. Setup refuses resource deletion, replacement, and untracked resource
+conflicts. After a failed stage, correct the error and run setup again.
 
-Setup reports `ready: true` after infrastructure, secret loading, and image
-selection succeed. It does not submit jobs or call a model. AWS charges apply.
-
-Setup rejects state from another account or region and plans that delete or
-replace resources. Use separate local state for another deployment. It never
-destroys infrastructure. If a stage fails, correct the reported error and run
-setup again. Terraform retains completed resources; matching image builds are
-reused.
-
-See [infra/README.md](infra/README.md) for the separate manual steps. Image commands
-still work separately; only setup selects a successful version automatically.
-Optional cloud test (starts an agent job; AWS and OpenRouter charges apply):
+## Full cloud test
 
 ```sh
-uv run python scripts/smoke_cloud.py
+uv run python scripts/e2e_cloud.py --env test --env-file .env
 ```
 
-The test's expected answer is computed independently in its code. A pass requires
-the downloaded answer to match, a successful run record, and a terminated VM.
+One approval covers this sequence; `--yes` permits unattended use:
 
-Downloaded smoke results stay under `.cloudbox/smoke/<run-id>/`. The worker's
-`output/result.json` is the deliverable. The run's top-level `result.json` is the
-supervisor's status record; it is not the same file.
+```text
+check clean -> setup -> math job -> download and validate -> teardown -> check clean
+```
 
-## Delete the deployment
+The test refuses `prod`, `legacy`, shared account IDs, and a non-empty Cloudbox
+deployment. It checks `(12345 * 6789) + 98765 == 83908970`, the downloaded JSON,
+run status, logs, listing, and VM termination. It tries teardown even if setup or
+the job fails. Cleanup failure fails the test. AWS and OpenRouter charges apply.
 
-Keep the deployment's input and state files. Use its SSO profile; stop other
-setup commands and job submissions. Preview with `--plan`, or run:
+Test cleanup permanently deletes its secret, results, logs, and image. Local
+reports and downloaded results stay under `.cloudbox/`. Do not run other setup,
+teardown, or job commands against `test` during this test. If cleanup fails or the
+process is killed, run teardown again with the same configuration and state.
+
+To test an existing deployment without deleting it:
 
 ```sh
-uv run python scripts/teardown.py
+uv run python scripts/smoke_cloud.py --env test
 ```
 
-After confirmation, this stops VMs, deletes the image and all bucket data, then
-destroys main infrastructure and IAM bootstrap. Cloud logs and results are lost.
-It checks that resources are gone. Local keys, configuration, state files, and
-downloads stay. Other AWS resources and retained service history stay.
+The worker's `output/result.json` is the answer. The run's top-level `result.json`
+is the supervisor's status record. They are separate files.
 
-The secret normally keeps its seven-day recovery window. For a clean rebuild,
-add `--force-delete-secret` to remove it without recovery; otherwise the same
-secret name cannot be reused until AWS deletes it. Add `--yes` to skip the prompt.
-If interrupted, run the command again with the same inputs and state. Versioned
-buckets or untracked resources require separate review.
-
-## CLI
-
-Commands return JSON. A command exit code describes the CLI operation, not the
-remote task outcome. Inspect `task_status` and `compute_state` separately.
+## Check or delete resources
 
 ```sh
-uv run cloudbox submit 'Calculate 12 * 13 and write {"answer": 156} to output/result.json.'
-uv run cloudbox list
-uv run cloudbox status RUN_ID
-uv run cloudbox logs RUN_ID --follow
-uv run cloudbox download RUN_ID
-uv run cloudbox cancel RUN_ID
+uv run python scripts/check_resources.py --env test
+uv run python scripts/check_resources.py --env test --require-clean
+uv run python scripts/teardown.py --env test --plan
+uv run python scripts/teardown.py --env test --force-delete-secret
 ```
 
-Submission also accepts stdin (`submit -`) or `--spec job.json`, with `--model`
-and `--timeout` overrides. The default is GLM 5.3; there is no automatic model
-fallback. A JSON job accepts `schema_version`, `prompt`, `model`, and
-`timeout_seconds`. Only the prompt is required. Downloads refuse to overwrite
-an existing destination. Saved partial outputs remain available after failure.
+Teardown asks for approval; `--yes` skips the prompt. It stops VMs, deletes the
+image and bucket contents, then destroys main infrastructure and IAM bootstrap.
+It verifies absence. Local keys, inputs, state files, and downloads stay.
+
+Without `--force-delete-secret`, the secret keeps seven-day recovery and the
+checker does not report a clean deployment. Keep state until deletion completes.
+For the old deployment, use `--env legacy`; its files remain in their old paths.
+
+Terraform deletes tracked resources, not all resources in an account. The shared
+checker uses a Terraform resource manifest plus AWS checks for images, active
+VMs, stored data, and project resources missing from state. New resource types
+need checker support before setup can proceed. See [infrastructure notes](infra/README.md).
+
+“Clean” means no Cloudbox resources in the checked scope and no populated
+Cloudbox state. AWS account defaults, SSO roles, and retained service history
+are not deleted. This is not an account-wide erase command.
+
+## Jobs
+
+Commands return JSON. Check `task_status` and `compute_state`; a successful CLI
+command does not mean that the remote task succeeded.
+
+```sh
+uv run cloudbox --env prod submit 'Calculate 12 * 13 and write {"answer": 156} to output/result.json.'
+uv run cloudbox --env prod list
+uv run cloudbox --env prod status RUN_ID
+uv run cloudbox --env prod logs RUN_ID --follow
+uv run cloudbox --env prod download RUN_ID
+uv run cloudbox --env prod cancel RUN_ID
+```
+
+Submission accepts stdin (`submit -`) or `--spec job.json`, with `--model` and
+`--timeout` overrides. A job accepts `schema_version`, `prompt`, `model`, and
+`timeout_seconds`. Only the prompt is required. No automatic model substitution.
+Downloads refuse to overwrite files. Saved partial output remains available.
 
 ## Limits
 
 - Pi and its supervisor share a VM without an internal security boundary.
-- Outbound internet access is open; inbound access is disabled.
-- Runtime AWS access is scoped, but a compromised worker can stop sibling VMs
-  that use the same image. It can also disclose credentials it can read.
-- The default deadline is 600 seconds, including 30 seconds for cleanup. The
-  spike maximum is 3,300 seconds because run-file credentials last one hour.
-- The prompt limit is 128,000 characters; the result limit is 1 MiB.
-- Run data and logs expire after 30 days. Deletion is not immediate at that age.
-- Cancellation can leave an `unknown` outcome if AWS stops the VM after the
-  CLI's immediate state check. Cancellation recovery is not yet tested.
-- No uploads, resume, local simulation, custom environments, or extra test suite.
+- Outbound access is open; inbound access is disabled.
+- A compromised worker can disclose credentials it can read or stop sibling VMs
+  that use the same image. Workers cannot access other runs' S3 files.
+- Default deadline: 600 seconds, including 30 seconds for cleanup; maximum 3,300.
+- Prompt limit: 128,000 characters. Result limit: 1 MiB.
+- Run data and logs expire after 30 days; deletion is not immediate at that age.
+- Cancellation can leave an `unknown` outcome. Recovery is not yet tested.
+- No uploads, resume, local worker simulation, or per-run environment changes.
 
-S3, logs, secret metadata, and IAM use Terraform. MicroVM image hooks are not yet
-supported by the selected Terraform resource, so the image uses a small script.
-Individual runs use Cloudbox records, not Terraform state. Keep the old image
-and retained run data until deletion is explicitly approved.
-
-The spike CLI reuses the restricted provisioner for trusted operator commands.
-Workers receive neither its credentials nor Terraform state. The final run record
-reports the Pi version from the selected image; it does not assume the current
-source tree describes an older image.
-
-See [PLAN.md](PLAN.md) for the decisions and current spike scope.
+The prior cloud math test passed on 2026-09-02 in the legacy account. The new
+multi-account lifecycle test has not yet been run against AWS.
+See [PLAN.md](PLAN.md) for decisions and verification records.

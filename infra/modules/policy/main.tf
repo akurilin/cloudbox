@@ -42,6 +42,7 @@ variable "deployment" {
 locals {
   config                = var.deployment
   iam_policy_version    = "2012-10-17"
+  inline_policy_name    = "cloudbox-access"
   retention_days        = 30
   secret_recovery_days  = 7
   sts_session_seconds   = 3600
@@ -222,6 +223,7 @@ locals {
 
 output "config" { value = local.config }
 output "iam_policy_version" { value = local.iam_policy_version }
+output "inline_policy_name" { value = local.inline_policy_name }
 output "retention_days" { value = local.retention_days }
 output "secret_recovery_days" { value = local.secret_recovery_days }
 output "sts_session_seconds" { value = local.sts_session_seconds }

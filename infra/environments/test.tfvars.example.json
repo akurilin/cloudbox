@@ -1,0 +1,14 @@
+{
+  "deployment": {
+    "aws_account_id": "783951396681",
+    "aws_region": "us-east-1",
+    "aws_profile": "cloudbox-test",
+    "project_name": "cloudbox",
+    "sso_permission_set_name": "AdministratorAccess",
+    "image_version": "",
+    "base_image_version": null,
+    "memory_mib": 1024,
+    "default_model": "z-ai/glm-5.3",
+    "timeout_seconds": 600
+  }
+}

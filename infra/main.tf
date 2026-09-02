@@ -115,7 +115,7 @@ resource "aws_iam_role" "worker" {
 
 resource "aws_iam_role_policy" "worker" {
   for_each = module.policy.role_policies
-  name     = "cloudbox-access"
+  name     = module.policy.inline_policy_name
   role     = aws_iam_role.worker[each.key].id
   policy   = each.value
 }

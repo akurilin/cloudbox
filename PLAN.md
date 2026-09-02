@@ -1,6 +1,6 @@
 # Cloudbox plan
 
-Status: setup now prepares infrastructure only; prior clean test passed.
+Status: multi-account support and lifecycle test implemented; live test not run.
 Last reviewed: 2026-09-02.
 
 The user approved implementation, Git initialization, and incremental commits.
@@ -25,11 +25,11 @@ ready for jobs. Internal Terraform stages are acceptable; no manual image build,
 secret upload, or version selection between stages. Keep the separate IAM
 bootstrap because the main root uses its restricted role.
 
-Use `uv run python scripts/setup.py`: check the Terraform input file, AWS
+Use `uv run python scripts/setup.py --env test`: check the Terraform input file, AWS
 access, and `.env` key; apply bootstrap and main infrastructure; load the key;
 build or reuse the matching image and wait; select its exact successful version.
 Report ready after these stages succeed. Do not submit an agent job or run the
-cloud math test during setup. Run `uv run python scripts/smoke_cloud.py` separately
+cloud math test during setup. Run `uv run python scripts/smoke_cloud.py --env test` separately
 when an end-to-end check is wanted; that command incurs AWS and OpenRouter usage.
 Tools, AWS account/SSO configuration, and the two private input files remain
 prerequisites. The entry point must not install tools, create credentials, or
@@ -90,7 +90,7 @@ worker. Infrastructure remains deployed and can accept new CLI submissions.
 
 ### Standard teardown
 
-Use `uv run python scripts/teardown.py`; `--plan` makes no AWS changes. One
+Use `uv run python scripts/teardown.py --env test`; `--plan` makes no AWS changes. One
 confirmation or `--yes` approves stopping VMs, deleting the image and bucket
 contents, and destroying main infrastructure before bootstrap. Check exact
 Terraform-derived targets, account, ownership, and absence. Permit another
@@ -107,12 +107,72 @@ preview found 20 Terraform items, one image, five S3 objects, and no active VMs.
 An output-only destroy plan also passed without cloud resource changes. The
 new deletion path has not been run. The current deployment is unchanged.
 
-### Deployment environments: planning
+### Deployment environments
 
 Use `prod` and `test`; the user selected `prod`, not `persistent`.
-Proposed layout: one repository, shared Terraform modules, separate environment
-inputs and bootstrap/main states. Environment selection and the full lifecycle
-test wrapper are not implemented. Do not require separate repository checkouts.
+Approved implementation: one repository and shared Terraform roots, with separate
+environment inputs, local backend paths, and Terraform working data. Require
+`--env test`, `--env prod`, or `--env legacy`; no default. Legacy keeps the
+existing management-account deployment and its original state paths.
+Never migrate that state into either new account.
+
+Inputs: ignored `infra/environments/<env>.tfvars.json`, with checked-in examples.
+States and backend data: `.cloudbox/environments/<env>/{bootstrap,main}/`.
+Terraform executes in each stage's `source/` directory, separate from state.
+Keys default to `.env.<env>`; `--env-file .env` explicitly selects the shared key.
+Setup still submits no jobs. Each CLI and helper uses the selected environment.
+
+Full test: `uv run python scripts/e2e_cloud.py --env test --env-file .env`.
+Require an empty Cloudbox deployment and state, and a test account distinct from
+prod and legacy. Check resources, run setup, submit the math job, validate its
+downloaded JSON and VM termination, check list/log operations, then tear down.
+Try cleanup after setup or job failure. Permanently delete the test secret and
+require a final clean check. A failed job or failed cleanup fails the test.
+Keep local reports and downloads. Do not run other commands against test during
+the full test. There is no account-wide erase or automatic wipe of existing data.
+
+A shared checker uses a Terraform-owned resource manifest, state and plan
+coverage checks, and AWS inventory of supported project resources. It also checks
+script-owned images, active VMs, bucket data, and pending secret deletion.
+New infrastructure needs corresponding checker coverage. Clean means no
+Cloudbox resources in that scope; AWS defaults, SSO access, unrelated resources,
+and retained service history remain. Terraform destroy alone is not an orphan
+resource checker.
+
+This pass implements the commands. A live full lifecycle test requires separate
+approval for AWS/OpenRouter charges and permanent deletion of its test data.
+
+Implementation checks found that `TF_DATA_DIR` alone did not isolate Terraform
+from the old root's implicit state. Use separate execution directories with links
+to shared source for all three environments. During the legacy compatibility
+check, same-path backend initialization emptied both original state files.
+Terraform had saved each prior state as a backup. Both were restored after JSON,
+resource-count, and account checks; restored files match those backups byte for
+byte. They contain the original 6 bootstrap and 14 main resource instances.
+AWS resources were not changed. Verify state hashes during further init checks.
+
+Review also found that valid partial state can lack account or region ARNs.
+Early checks now reject conflicting known identities; exact manifest matching
+and live AWS account/ownership checks cover partial state before any mutation.
+
+Verification completed on 2026-09-02:
+
+- Python compilation, all command help, Terraform formatting, and all six
+  environment/root validation checks passed.
+- Init preserves state bytes, including the restored legacy state. Each source
+  directory is separate from its state; unexpected implicit state is rejected.
+- Read-only checks report test and prod clean: no Cloudbox resources or state.
+- Legacy inventory and destroy preview found the expected 20 tracked items,
+  one image, five objects, no active VMs, and no untracked or orphan resources.
+  Normal plans for both legacy roots contain zero resource changes.
+- Partial-state and conflicting-identity checks passed. The lifecycle test
+  rejects prod. Declining approval returns JSON and starts no cloud stages.
+- Review found and fixed approval prompts entering JSON stdout. The declined
+  test then passed; report: `.cloudbox/e2e/test/12ed13c8-53d7-4b12-87af-1adb89fbcaaf/report.json`.
+
+No infrastructure apply, agent job, or teardown ran in this pass. The new full
+lifecycle path is not yet cloud-verified. Run it only with approval for charges
+and permanent test-data deletion. The legacy deployment remains in AWS.
 
 Initial read-only Organizations checks on 2026-09-02 found that account
 `618170664907` is the management account of `o-4vt9cqww4f`, then its only account.
@@ -124,8 +184,8 @@ The user subsequently created these member accounts; both were verified ACTIVE:
 The existing IAM Identity Center instance is in `us-west-1`, using local SSO
 session `my-sso`. Read-only checks confirmed that `alex.kurilin` has a direct
 `AdministratorAccess` assignment in both accounts, with the AWS-managed
-`AdministratorAccess` policy. Account login has not been tested.
-Next: configure separate local profiles for bootstrap and teardown. Worker
+`AdministratorAccess` policy. Local profiles `cloudbox-prod` and `cloudbox-test`
+now reuse `my-sso`; STS verified each expected member account. Worker
 permissions stay restricted. Keep Cloudbox resources in `us-east-1`.
 AWS recommends keeping workloads out of the management account and using
 temporary credentials through federation.
@@ -134,7 +194,8 @@ and [access guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-prac
 No Cloudbox resources were deployed in the new accounts and no access grants
 were changed during verification. Deployment, migration, and removal of the
 current deployment need separate approval. Never repoint its existing state
-at a new account.
+at a new account. Local and read-only checks passed; no cloud job has run in
+either member account.
 
 ### Cloud execution scope
 

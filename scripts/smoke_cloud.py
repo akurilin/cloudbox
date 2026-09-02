@@ -1,11 +1,16 @@
-"""Run the one spike test against the deployed AWS worker."""
+"""Check one cloud job, its saved result, logs, and stopped VM."""
 
+import argparse
 import json
 from pathlib import Path
 import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from cloudbox.common import CloudboxError, emit, error_record
+from cloudbox.environments import add_environment_argument, get_environment
 
 FACTOR_LEFT = 12345
 FACTOR_RIGHT = 6789
@@ -13,77 +18,161 @@ OFFSET = 98765
 EXPECTED_ANSWER = FACTOR_LEFT * FACTOR_RIGHT + OFFSET
 RUN_TIMEOUT_SECONDS = 600
 OBSERVATION_GRACE_SECONDS = 120
+LOG_WAIT_SECONDS = 60
 POLL_SECONDS = 5
 COMMAND_TIMEOUT_SECONDS = 60
 SUCCESS_STATUS = "succeeded"
 TERMINATED_STATE = "TERMINATED"
+INTERRUPTED_EXIT_CODE = 130
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_PATH = Path("output/result.json")
+TEST_NAME = "cloud_math"
 
 
-def command(*arguments: str) -> dict:
-    """Exercise the public CLI, including its JSON response contract."""
+def command_records(environment, *arguments):
+    """Use the public CLI; never include raw stderr in saved errors."""
     response = subprocess.run(
-        [sys.executable, "-m", "cloudbox", *arguments],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
+        [sys.executable, "-m", "cloudbox", "--env", environment.name, *arguments],
+        cwd=REPO_ROOT, text=True, capture_output=True,
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
-    if response.returncode:
-        raise RuntimeError(response.stderr.strip() or response.stdout.strip())
-    return json.loads(response.stdout)
+    try:
+        records = [json.loads(line) for line in response.stdout.splitlines() if line.strip()]
+        if any(not isinstance(record, dict) for record in records):
+            raise ValueError
+    except ValueError as error:
+        raise CloudboxError("invalid_cli_output", "The CLI did not return JSON objects.") from error
+    if response.returncode or any(record.get("ok") is False for record in records):
+        last = records[-1] if records else {}
+        raise CloudboxError("cli_failed", f"Cloudbox {arguments[0]} failed.",
+                            exit_code=response.returncode, cli_error=last.get("error", {}).get("code"),
+                            run_id=last.get("run_id"))
+    return records
 
 
-def main() -> int:
+def command(environment, *arguments):
+    records = command_records(environment, *arguments)
+    if len(records) != 1:
+        raise CloudboxError("invalid_cli_output", "The CLI did not return one result.")
+    return records[0]
+
+
+def listed_run(environment, identity):
+    cursor = None
+    while True:
+        arguments = ["list"]
+        if cursor:
+            arguments.extend(("--cursor", cursor))
+        page = command(environment, *arguments)
+        for run in page["runs"]:
+            if run.get("run_id") == identity:
+                return run
+        cursor = page.get("next_cursor")
+        if not cursor:
+            raise CloudboxError("run_not_listed", "The completed run is missing from the run list.")
+
+
+def log_count(environment, identity):
+    # Save counts only; CloudWatch messages need not enter the test report.
+    records = command_records(environment, "logs", identity)
+    if not records or records[-1].get("end_of_stream") is not True:
+        raise CloudboxError("invalid_log_output", "The CLI did not finish the log read.")
+    return sum("event" in record for record in records)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Run and validate one cloud math job. AWS and OpenRouter charges apply.")
+    add_environment_argument(parser)
+    parser.add_argument("--output-directory", type=Path, help="Parent directory for this run's downloaded files.")
+    arguments = parser.parse_args(argv)
+    environment = get_environment(arguments.env)
     prompt = (
         f"Calculate ({FACTOR_LEFT} * {FACTOR_RIGHT}) + {OFFSET}. "
         "Use a tool to check your calculation. Write the integer answer to "
         'output/result.json as a JSON object with exactly one key, "answer". '
         "Do not put Markdown in the file."
     )
-    run_id = None
-    terminated = False
+    identity, terminated, status, destination = None, False, None, None
+    stage = "submit"
     try:
-        submitted = command("submit", prompt, "--timeout", str(RUN_TIMEOUT_SECONDS))
-        run_id = submitted["run_id"]
-        print(json.dumps({"test": "cloud_math", "run_id": run_id, "status": "waiting"}), flush=True)
+        submitted = command(environment, "submit", prompt, "--timeout", str(RUN_TIMEOUT_SECONDS))
+        identity = submitted["run_id"]
+        parent = arguments.output_directory or REPO_ROOT / ".cloudbox" / "smoke" / environment.name
+        destination = parent.expanduser().resolve() / identity
+        emit({"test": TEST_NAME, "environment": environment.name, "run_id": identity, "status": "waiting"})
         deadline = time.monotonic() + RUN_TIMEOUT_SECONDS + OBSERVATION_GRACE_SECONDS
 
-        # Wait for compute to stop, not just for the model to finish its reply.
+        # Compute must stop before download; the saved result must outlive the VM.
+        stage = "status"
         while time.monotonic() < deadline:
-            status = command("status", run_id)
+            status = command(environment, "status", identity)
             if status["compute_state"] == TERMINATED_STATE:
                 terminated = True
                 break
             time.sleep(POLL_SECONDS)
         if not terminated:
-            raise RuntimeError("The VM did not reach TERMINATED before the test deadline.")
+            raise CloudboxError("vm_not_stopped", "The VM did not stop before the test deadline.")
         if status["task_status"] != SUCCESS_STATUS:
-            raise RuntimeError(f"Run {run_id} ended with {status['task_status']}.")
+            raise CloudboxError("job_failed", "The math job did not succeed.", task_status=status["task_status"])
 
-        # Download after termination to prove that the result outlives the VM.
-        destination = REPO_ROOT / ".cloudbox" / "smoke" / run_id
-        command("download", run_id, "--output", str(destination))
+        stage = "download"
+        command(environment, "download", identity, "--output", str(destination))
         artifact = destination / ARTIFACT_PATH
         result = json.loads(artifact.read_text(encoding="utf-8"))
         if not isinstance(result, dict) or set(result) != {"answer"}:
-            raise RuntimeError("The downloaded file must contain only an answer field.")
+            raise CloudboxError("invalid_answer", "The downloaded file must contain only an answer field.")
         if type(result["answer"]) is not int or result["answer"] != EXPECTED_ANSWER:
-            raise RuntimeError(f"The answer does not equal {EXPECTED_ANSWER}.")
-        print(json.dumps({
-            "test": "cloud_math", "status": "passed", "run_id": run_id,
-            "answer": result["answer"], "artifact_path": str(artifact),
-        }))
+            raise CloudboxError("wrong_answer", f"The answer does not equal {EXPECTED_ANSWER}.")
+
+        stage = "list"
+        listed = listed_run(environment, identity)
+        if listed["task_status"] != SUCCESS_STATUS or listed["compute_state"] != TERMINATED_STATE:
+            raise CloudboxError("invalid_run_list", "The run list does not show success and a stopped VM.")
+        stage = "logs"
+        log_deadline = time.monotonic() + LOG_WAIT_SECONDS
+        events = log_count(environment, identity)
+        while not events and time.monotonic() < log_deadline:
+            time.sleep(POLL_SECONDS)
+            events = log_count(environment, identity)
+        if not events:
+            raise CloudboxError("logs_missing", "CloudWatch returned no events for this run.")
+        emit({"ok": True, "test": TEST_NAME, "environment": environment.name,
+              "status": "passed", "run_id": identity, "answer": result["answer"],
+              "artifact_path": str(artifact), "compute_state": status["compute_state"],
+              "listed": True, "log_event_count": events})
         return 0
     except (Exception, KeyboardInterrupt) as error:
-        if run_id and not terminated:
+        # A lost launch reply can still include the run ID; never submit a second job.
+        if not identity and isinstance(error, CloudboxError):
+            identity = error.details.get("run_id")
+        cancelled, cancellation_error = None, None
+        if identity and not terminated:
             try:
-                command("cancel", run_id)
-            except Exception:
-                print("Cancellation failed; the AWS run deadline remains active.", file=sys.stderr)
-        print(f"Cloud test failed: {error}", file=sys.stderr)
-        return 1
+                cancelled = command(environment, "cancel", identity).get("cancel_requested")
+            except Exception as cancel_error:
+                cancellation_error = error_record(cancel_error)["error"]
+        diagnostic_errors, events = [], None
+        if identity:
+            # Keep saved records before lifecycle teardown removes cloud data.
+            if destination is None:
+                parent = arguments.output_directory or REPO_ROOT / ".cloudbox" / "smoke" / environment.name
+                destination = parent.expanduser().resolve() / identity
+            try:
+                if not destination.exists():
+                    command(environment, "download", identity, "--output", str(destination))
+            except Exception as diagnostic_error:
+                diagnostic_errors.append(error_record(diagnostic_error)["error"])
+            try:
+                events = log_count(environment, identity)
+            except Exception as diagnostic_error:
+                diagnostic_errors.append(error_record(diagnostic_error)["error"])
+        emit({**error_record(error), "test": TEST_NAME, "environment": environment.name,
+              "status": "failed", "stage": stage, "run_id": identity,
+              "compute_state": status.get("compute_state") if status else None,
+              "cancel_requested": cancelled, "cancellation_error": cancellation_error,
+              "download_directory": str(destination) if destination else None,
+              "log_event_count": events, "diagnostic_errors": diagnostic_errors})
+        return INTERRUPTED_EXIT_CODE if isinstance(error, KeyboardInterrupt) else 1
 
 
 if __name__ == "__main__":

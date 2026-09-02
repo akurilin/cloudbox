@@ -2,7 +2,6 @@
 
 import json
 import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,18 +66,17 @@ def error_record(error):
     return {"ok": False, "error": {"code": type(error).__name__}}
 
 
-def load_deployment():
+def load_deployment(environment):
     # Read only the named output; do not refresh state or cache credentials.
     try:
-        result = subprocess.run(
-            ["terraform", f"-chdir={ROOT / 'infra'}", "output", "-json", TERRAFORM_OUTPUT],
-            capture_output=True, text=True, timeout=30, check=True,
-        )
-        data = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        data = json.loads(environment.terraform(
+            environment.main_root, "output", "-json", TERRAFORM_OUTPUT, capture=True,
+        ))
+        config = json.loads(environment.input_path.read_bytes())["deployment"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
         raise CloudboxError("deployment_unavailable", "Read the initialized Terraform output first.") from error
     required = (
-        "aws_account_id", "aws_region", "aws_profile", "bucket_name",
+        "aws_account_id", "aws_region", "aws_profile", "project_name", "bucket_name",
         "provisioner_role_arn", "run_data_role_arn", "runtime_role_arn",
         "openrouter_secret_arn", "log_group_name", "image_arn",
     )
@@ -86,6 +84,9 @@ def load_deployment():
         raise CloudboxError("deployment_invalid", "The Terraform output is incomplete.")
     if not re.fullmatch(r"\d{12}", data["aws_account_id"]):
         raise CloudboxError("deployment_invalid", "The AWS account ID is invalid.")
+    identity_fields = ("aws_account_id", "aws_region", "aws_profile", "project_name")
+    if not isinstance(config, dict) or any(data[field] != config.get(field) for field in identity_fields):
+        raise CloudboxError("state_mismatch", "Terraform output does not match the selected environment inputs.")
     return data
 
 

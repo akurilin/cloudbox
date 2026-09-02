@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from botocore.exceptions import BotoCoreError, ClientError
 from cloudbox.common import CloudboxError, SDK_CONFIG, emit, error_record, load_deployment, operator_session
+from cloudbox.environments import add_environment_argument, get_environment
 
 KEY_NAME = "OPENROUTER_API_KEY"
 MAX_KEY_FILE_BYTES = 16_384
@@ -38,12 +39,13 @@ def key_from_file(path):
     return matches[0]
 
 
-def main():
+def main(argv=None):
     try:
         parser = argparse.ArgumentParser(description="Store the OpenRouter key in Secrets Manager.")
+        add_environment_argument(parser)
         parser.add_argument("--env-file", type=Path)
-        arguments = parser.parse_args()
-        deployment = load_deployment()
+        arguments = parser.parse_args(argv)
+        deployment = load_deployment(get_environment(arguments.env))
         session = operator_session(deployment)
         if arguments.env_file:
             secret = key_from_file(arguments.env_file)

@@ -1,6 +1,9 @@
 terraform {
   required_version = ">= 1.10, < 2.0"
 
+  # Bootstrap and main use separate state paths in each environment.
+  backend "local" {}
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
