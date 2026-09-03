@@ -2,6 +2,7 @@
 
 - When implementing changes to the codebase, work using a supervisor/verifier + worker sub-agents pattern where the work split makes sense.
 - Work directly in main unless asked otherwise
+- Implement only essential, high-leverage, load-bearing tests, testing meaty and regression-prone paths within the code.
 
 ## Session start
 
