@@ -1,5 +1,5 @@
 variable "deployment" {
-  description = "Non-secret settings from cloudbox.auto.tfvars.json."
+  description = "Non-secret settings from the environment input file the user provides."
   type        = any
 }
 

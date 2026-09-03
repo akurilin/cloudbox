@@ -1,8 +1,8 @@
 {
   "deployment": {
-    "aws_account_id": "968438785594",
+    "aws_account_id": "123456789012",
     "aws_region": "us-east-1",
-    "aws_profile": "cloudbox-prod",
+    "aws_profile": "REPLACE-WITH-YOUR-AWS-PROFILE",
     "project_name": "cloudbox",
     "sso_permission_set_name": "AdministratorAccess",
     "image_version": "",

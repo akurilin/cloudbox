@@ -1,7 +1,14 @@
 # Cloudbox plan
 
 Status: multi-account support and lifecycle test implemented; live test not run.
-Last reviewed: 2026-09-02.
+Last reviewed: 2026-09-03.
+
+On 2026-09-03 the user removed all hard-coded AWS accounts, profile names, and
+SSO session names from the repository and deleted the legacy environment.
+Environments are now defined only by user-created, Git-ignored
+`infra/environments/<env>.tfvars.json` files; the tracked examples carry
+placeholder values. Concrete identifiers in this historical record were
+removed at the same time; the record below describes them generically.
 
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
@@ -111,25 +118,28 @@ new deletion path has not been run. The current deployment is unchanged.
 
 Use `prod` and `test`; the user selected `prod`, not `persistent`.
 Approved implementation: one repository and shared Terraform roots, with separate
-environment inputs, local backend paths, and Terraform working data. Require
-`--env test`, `--env prod`, or `--env legacy`, except for the full test, which
-defaults to test and rejects other environments. Legacy keeps the
-existing management-account deployment and its original state paths.
-Never migrate that state into either new account.
+environment inputs, local backend paths, and Terraform working data. Commands
+require `--env <name>` for an environment the user configured locally, except for
+the full test, which defaults to test and rejects other environments. The
+legacy environment — the old management-account deployment with its original
+state paths — was removed on 2026-09-03; environment names, accounts, and
+profiles are no longer hard-coded in the repository.
 
-Inputs: ignored `infra/environments/<env>.tfvars.json`, with checked-in examples.
+Inputs: ignored `infra/environments/<env>.tfvars.json`, with checked-in
+placeholder examples that contain no real account IDs or profile names.
 States and backend data: `.cloudbox/environments/<env>/{bootstrap,main}/`.
 Terraform executes in each stage's `source/` directory, separate from state.
-Keys default to `.env.<env>`; `--env-file .env` explicitly selects the shared key.
+Keys default to `.env.<env>`.
 Setup still submits no jobs. Each CLI and helper uses the selected environment.
 
-Full test: `uv run python scripts/e2e_cloud.py --env-file .env`.
+Full test: `uv run python scripts/e2e_cloud.py`.
 The user permits test resources to be removed at any time. No approval prompt
 or `--yes` is needed for the full test. Keep account, state, and ownership checks;
 this changes human approval, not IAM permissions or deletion scope.
 Reset existing Cloudbox test resources with the standard teardown, including
 permanent secret deletion. Require a clean check before setup and a test account
-distinct from prod and legacy. Run setup, submit the math job, validate its
+distinct from every other locally configured environment. Run setup, submit
+the math job, validate its
 downloaded JSON and VM termination, check list/log operations, then tear down.
 Try cleanup after setup or job failure. Permanently delete the test secret and
 require a final clean check. A failed job or failed cleanup fails the test.
@@ -146,7 +156,7 @@ and retained service history remain. Terraform destroy alone is not an orphan
 resource checker.
 
 The Cloudbox test lifecycle has standing user approval, including AWS/OpenRouter
-charges and permanent test-data deletion. Prod and legacy operations do not.
+charges and permanent test-data deletion. Prod and other non-test operations do not.
 Default selection, automatic reset, no-prompt execution, and prod rejection
 passed local control-flow checks with AWS calls replaced. No live run was made
 for this change. The old `--yes` flag remains an optional compatibility no-op.
@@ -182,20 +192,22 @@ Verification completed on 2026-09-02:
 No infrastructure apply, agent job, or teardown ran in this pass. The new full
 lifecycle path is not yet cloud-verified. The user later removed the full test's
 approval requirement and permitted automatic test reset, as recorded above.
-The legacy deployment remains in AWS.
+The legacy deployment remains in AWS but is no longer managed by this repository.
 
-Initial read-only Organizations checks on 2026-09-02 found that account
-`618170664907` is the management account of `o-4vt9cqww4f`, then its only account.
-The user subsequently created these member accounts; both were verified ACTIVE:
+Initial read-only Organizations checks on 2026-09-02 found that the user's
+original account is the management account of the user's organization, then its
+only account. The user subsequently created these member accounts; both were
+verified ACTIVE (concrete account IDs and profile names are no longer recorded
+here; they live only in the user's local, Git-ignored input files):
 
-- `prod`: `cloudbox-prod`, account `968438785594`.
-- `test`: `cloudbox-test`, account `783951396681`.
+- `prod`: the user's long-lived member account.
+- `test`: the user's disposable member account.
 
-The existing IAM Identity Center instance is in `us-west-1`, using local SSO
-session `my-sso`. Read-only checks confirmed that `alex.kurilin` has a direct
+The existing IAM Identity Center instance is in the user's SSO region, using the
+user's local SSO session. Read-only checks confirmed that the user has a direct
 `AdministratorAccess` assignment in both accounts, with the AWS-managed
-`AdministratorAccess` policy. Local profiles `cloudbox-prod` and `cloudbox-test`
-now reuse `my-sso`; STS verified each expected member account. Worker
+`AdministratorAccess` policy. The user's local `prod` and `test` profiles
+now reuse that SSO session; STS verified each expected member account. Worker
 permissions stay restricted. Keep Cloudbox resources in `us-east-1`.
 AWS recommends keeping workloads out of the management account and using
 temporary credentials through federation.
@@ -224,8 +236,8 @@ either member account.
 - The manager coordinates infrastructure, worker, and CLI agents, then reviews
   their integration. No agent may deploy without the reviewed cloud changes.
 
-Git is initialized on `main`. AWS SSO identity was verified for account
-`618170664907`. The user supplied the OpenRouter key in the ignored `.env` file.
+Git is initialized on `main`. AWS SSO identity was verified for the user's
+original account. The user supplied the OpenRouter key in the ignored `.env` file.
 Never put either credential in source, chat, saved job records, or Terraform state.
 The user confirmed Pi and `z-ai/glm-5.3` through OpenRouter; no Claude Code or
 Anthropic inference integration is part of this spike.
@@ -302,7 +314,7 @@ values, with no user overrides. Q35 selects committed source only for future
 code tasks. Q36 excludes input uploads. Q37 selects simple deliverables without
 a separate code diff. Q38 permits success without code changes. Q39 requires
 supplied validation to pass when that later feature is supported. Q40 selects
-Lambda MicroVMs. Q41 selects account `618170664907`, with configurable deployment
+Lambda MicroVMs. Q41 selects the user's original account, with configurable deployment
 inputs and project resource tracking. Q42 selects `us-east-1`.
 Record agreed answers here as the discussion proceeds; distinguish them from
 proposals. These records do not approve implementation or AWS deployment.
@@ -336,9 +348,9 @@ Example tasks:
 | Agent harness | Pi is the user's preferred default, not a fixed dependency |
 | Model provider | OpenRouter |
 | Sandbox model | GLM 5.3 (`z-ai/glm-5.3`); allow explicit per-run overrides |
-| Deployment | Account `618170664907`, region `us-east-1`; configurable, not hard-coded in implementation |
+| Deployment | The user's original account, region `us-east-1`; configurable, not hard-coded in implementation |
 | Compute | Lambda MicroVMs |
-| Bootstrap profile | `AdministratorAccess-618170664907`; temporary SSO, approved bootstrap only |
+| Bootstrap profile | The user's temporary SSO administrator profile; approved bootstrap only |
 | First task | Write a poem to a new, non-empty `result.txt`; download it after completion |
 | Initial use | One user, concurrent independent runs; no sensitive data needed for the poem test |
 | User interface | Agent-friendly local CLI with JSON output, listing, filtering, logs, status, download, submit, and cancel |
@@ -499,9 +511,9 @@ user or a long-lived access key for this project. Do not paste credentials into
 chat or commit them.
 
 Read-only check on 2026-09-02: AWS CLI 2.36.13 is installed and recognizes
-`RunMicrovm`. Profiles `default` and `AdministratorAccess-618170664907` both
-configure account `618170664907`, role `AdministratorAccess`, and `us-west-1`.
-Both STS checks failed because the SSO token expired. These are configured
+`RunMicrovm`. The user's local default and SSO administrator profiles both
+configure the user's original account, role `AdministratorAccess`, and the SSO
+region. Both STS checks failed because the SSO token expired. These are configured
 identities, not verified current access. Q41 subsequently selected the named
 administrator profile for approved bootstrap; Q42 selected `us-east-1` instead
 of the profile's configured region.
@@ -514,11 +526,11 @@ Homebrew reports the current release. No AWS login or deployment occurred.
 
 ```sh
 aws configure list-profiles
-aws sso login --profile AdministratorAccess-618170664907
-aws sts get-caller-identity --profile AdministratorAccess-618170664907
+aws sso login --profile <the SSO administrator profile>
+aws sts get-caller-identity --profile <the SSO administrator profile>
 ```
 
-Q41 selects account `618170664907`. The user reports that it is empty; no resource
+Q41 selects the user's original account. The user reports that it is empty; no resource
 inventory has verified this. Q40 selects Lambda MicroVMs and Q42 selects
 `us-east-1`. Set the project region explicitly; do not change the global AWS
 profile region. Recheck authenticated identity before approved cloud writes.
@@ -1266,8 +1278,8 @@ Deployment still needs separate approval.
 
 - Q40 accepted: Lambda MicroVMs for v1. Do not silently select another backend
   if checks fail.
-- Q41 accepted: account `618170664907`, reported empty by the user. Use
-  `AdministratorAccess-618170664907` for approved bootstrap, then the restricted
+- Q41 accepted: the user's original account, reported empty by the user. Use
+  the user's SSO administrator profile for approved bootstrap, then the restricted
   provisioner role for normal provisioning. Track project infrastructure with
   Terraform and identify project resources consistently. Keep the account and
   other deployment settings configurable in the Terraform-owned local input

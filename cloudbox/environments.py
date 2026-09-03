@@ -4,13 +4,16 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 from cloudbox.common import ROOT, CloudboxError
 
-ENVIRONMENT_NAMES = ("test", "prod", "legacy")
-LEGACY_ENVIRONMENT = "legacy"
+# Environments are not built into Cloudbox. A user defines each one locally by
+# creating its Git-ignored input file; the repository ships only placeholders.
+ENVIRONMENT_NAME_PATTERN = re.compile(r"[a-z][a-z0-9-]{1,31}")
+INPUT_SUFFIX = ".tfvars.json"
 DEFAULT_WORKSPACE = "default"
 LOCAL_BACKEND = "local"
 STATE_FILENAME = "terraform.tfstate"
@@ -25,8 +28,12 @@ class Environment:
     name: str
 
     def __post_init__(self):
-        if self.name not in ENVIRONMENT_NAMES:
-            raise CloudboxError("invalid_environment", "Select test, prod, or legacy.")
+        if not ENVIRONMENT_NAME_PATTERN.fullmatch(self.name):
+            raise CloudboxError("invalid_environment",
+                                "Use 2-32 lowercase letters, digits, or hyphens; start with a letter.")
+        if not self.input_path.exists():
+            raise CloudboxError("environment_not_configured",
+                                f"Create {self.input_path} from the example file and fill in your own account, region, and profile.")
 
     @property
     def main_root(self):
@@ -42,14 +49,11 @@ class Environment:
 
     @property
     def input_path(self):
-        if self.name == LEGACY_ENVIRONMENT:
-            return self.main_root / "cloudbox.auto.tfvars.json"
-        return self.main_root / "environments" / f"{self.name}.tfvars.json"
+        return self.main_root / "environments" / f"{self.name}{INPUT_SUFFIX}"
 
     @property
     def key_path(self):
-        filename = ".env" if self.name == LEGACY_ENVIRONMENT else f".env.{self.name}"
-        return ROOT / filename
+        return ROOT / f".env.{self.name}"
 
     def stage_directory(self, directory):
         directory = Path(directory).resolve()
@@ -59,10 +63,6 @@ class Environment:
         return ROOT / ".cloudbox" / "environments" / self.name / stages[directory]
 
     def state_path(self, directory):
-        if self.name == LEGACY_ENVIRONMENT:
-            # Keep existing state; only Terraform's execution directory is new.
-            self.stage_directory(directory)
-            return Path(directory).resolve() / STATE_FILENAME
         return self.stage_directory(directory) / STATE_FILENAME
 
     def data_dir(self, directory):
@@ -72,7 +72,7 @@ class Environment:
         return self.stage_directory(directory) / SOURCE_DIRECTORY
 
     def prepare_directory(self, directory):
-        # Shared source links keep Terraform away from the legacy root's implicit state.
+        # Shared source links keep Terraform away from any environment's implicit state.
         working = self.execution_directory(directory)
         working.mkdir(parents=True, exist_ok=True)
         implicit_state = working / STATE_FILENAME
@@ -148,7 +148,7 @@ class Environment:
             self.prepare_directory(directory)
             selected.extend((f"-backend-config=path={self.state_path(directory)}", "-lockfile=readonly"))
         if selected[0] in {"plan", "console"}:
-            # Use only the selected inputs; never load the legacy automatic variable file.
+            # Use only the selected inputs; never load another environment's variable files.
             selected.append(f"-var-file={self.input_path}")
         try:
             result = subprocess.run(
@@ -171,6 +171,13 @@ def get_environment(name):
     return Environment(name)
 
 
+def configured_environments():
+    """List environments the user has defined locally, in name order."""
+    directory = ROOT / "infra" / "environments"
+    names = (path.name[:-len(INPUT_SUFFIX)] for path in directory.glob(f"*{INPUT_SUFFIX}"))
+    return sorted(name for name in names if ENVIRONMENT_NAME_PATTERN.fullmatch(name))
+
+
 def add_environment_argument(parser):
-    parser.add_argument("--env", choices=ENVIRONMENT_NAMES, required=True,
-                        help="Select isolated configuration and state; legacy keeps the old deployment.")
+    parser.add_argument("--env", required=True, metavar="ENV",
+                        help="Select an environment you configured locally in infra/environments/<env>.tfvars.json.")

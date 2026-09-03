@@ -11,12 +11,11 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cloudbox.common import ROOT, CloudboxError, emit, error_record, operator_session, timestamp
-from cloudbox.environments import get_environment
+from cloudbox.environments import configured_environments, get_environment
 from cloudbox.resources import check_resources
 from scripts import setup, smoke_cloud, teardown
 
 TEST_ENVIRONMENT = "test"
-PROTECTED_ENVIRONMENTS = ("prod", "legacy")
 IDENTITY_FIELDS = ("aws_account_id", "aws_region", "aws_profile", "project_name")
 REPORT_VERSION = 1
 INTERRUPTED_EXIT_CODE = 130
@@ -24,24 +23,23 @@ TEST_NAME = "cloud_lifecycle"
 
 
 def test_configuration(environment, expected=None):
-    # Refuse prod, reused account IDs, or changed targets before cloud changes.
+    # Refuse reused account IDs or changed targets before cloud changes. The test
+    # environment must not share an account with any environment the user
+    # configured locally, whatever they named it.
     if environment.name != TEST_ENVIRONMENT:
         raise CloudboxError("test_only", "The lifecycle test accepts only --env test.")
     config = setup.read_config(environment)[0]["deployment"]
     if expected and any(config[field] != expected[field] for field in IDENTITY_FIELDS):
         raise CloudboxError("test_target_changed", "The test account or deployment settings changed. Stop and inspect them.")
-    for name in PROTECTED_ENVIRONMENTS:
-        protected = get_environment(name)
-        if name == "legacy" and not protected.input_path.exists():
-            for root in protected.roots:
-                path = protected.state_path(root)
-                if path.exists():
-                    state = json.loads(path.read_bytes())
-                    if state.get("resources") or state.get("outputs"):
-                        raise CloudboxError("legacy_config_missing", "Restore the legacy input file before the lifecycle test.")
+    for name in configured_environments():
+        if name == environment.name:
             continue
-        other = setup.read_config(protected)[0]["deployment"]
-        if config["aws_account_id"] == other["aws_account_id"]:
+        try:
+            other = json.loads(get_environment(name).input_path.read_bytes())["deployment"]
+        except (OSError, ValueError, KeyError, TypeError):
+            # An unreadable input file cannot identify a shared account.
+            continue
+        if isinstance(other, dict) and other.get("aws_account_id") == config["aws_account_id"]:
             raise CloudboxError("test_account_shared", f"Test must use a different account from {name}.")
     return config
 
