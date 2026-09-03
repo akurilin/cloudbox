@@ -11,37 +11,36 @@ CLI -> MicroVM -> Pi -> OpenRouter
 
 ## Environments
 
-Use one repository with separate credentials, configuration, and Terraform state.
-Commands require `--env`, except the full test, which defaults to `test` and
-cannot use another environment.
+Commands require `--env test` or `--env prod`. Use `test` for disposable resources
+and `prod` for a persistent deployment. The full cloud test defaults to `test`
+and rejects other environments.
 
-| Environment | AWS account | SSO profile |
-| --- | --- | --- |
-| `test` | `783951396681` | `cloudbox-test` |
-| `prod` | `968438785594` | `cloudbox-prod` |
-| `legacy` | `618170664907` | `AdministratorAccess-618170664907` |
+Set your account ID, region, and AWS profile in
+`infra/environments/<env>.tfvars.json`. These local files are Git-ignored.
+Each environment has separate bootstrap and main state under
+`.cloudbox/environments/<env>/`. Back up inputs and state. Never change the
+account or region of existing state. The wrappers check the selected account;
+the CLI reads Terraform outputs in memory.
 
-Resources use `us-east-1`. The existing SSO session, `my-sso`, uses `us-west-1`.
-The `legacy` option retains access to the old management-account deployment.
-It does not migrate its data or state.
-
-Non-secret inputs live in `infra/environments/<env>.tfvars.json`. Each environment
-has separate bootstrap and main state under `.cloudbox/environments/<env>/`.
-Keep these local files out of Git and back them up. Never change the account or
-region of an existing state. The CLI reads selected Terraform outputs in memory.
-Generated working directories link to the shared Terraform source; they do not
-copy configuration or state from another environment.
+`--env legacy` is removed. Its old local files remain ignored. Existing AWS
+resources remain; Cloudbox no longer manages that deployment.
 
 ## Setup
 
-Requirements: Python 3.12+, uv, Terraform, AWS CLI, and SSO administrator access.
-For a new checkout, copy the selected `infra/environments/*.tfvars.example.json`
-to the corresponding `*.tfvars.json` path. Keep the OpenRouter key in
-`.env.test` or `.env.prod` as `OPENROUTER_API_KEY=...`; these files are ignored.
-Use `--env-file .env` to select the existing shared key explicitly.
+Requirements: Python 3.12+, uv, Terraform, AWS CLI, and SSO administrator access
+in your own accounts. Copy the shared example:
 
 ```sh
-aws sso login --profile cloudbox-test
+cp infra/environments/deployment.tfvars.example.json infra/environments/test.tfvars.json
+```
+
+Replace the placeholder account ID and AWS profile; check the other settings.
+Keep the OpenRouter key in `.env.test` as `OPENROUTER_API_KEY=...`.
+For `prod`, copy the example to `infra/environments/prod.tfvars.json` and use
+`.env.prod`. Both key files are Git-ignored.
+
+```sh
+aws sso login --profile YOUR-PROFILE
 uv run python scripts/setup.py --env test
 ```
 
@@ -60,7 +59,7 @@ conflicts. After a failed stage, correct the error and run setup again.
 ## Full cloud test
 
 ```sh
-uv run python scripts/e2e_cloud.py --env-file .env
+uv run python scripts/e2e_cloud.py
 ```
 
 The test runs without approval prompts. The test deployment is disposable:
@@ -70,7 +69,9 @@ reset test -> check clean -> setup -> math job -> validate -> teardown -> check 
 ```
 
 The test clears an existing Cloudbox test deployment before setup. It refuses
-`prod`, `legacy`, shared account IDs, and unknown deletion targets. It checks
+unknown deletion targets, invalid production inputs, and a production account
+that matches the test account. Production inputs can be absent only when
+production state is empty. It checks
 `(12345 * 6789) + 98765 == 83908970`, the downloaded JSON,
 run status, logs, listing, and VM termination. It tries teardown even if setup or
 the job fails. Cleanup failure fails the test. AWS and OpenRouter charges apply.
@@ -104,7 +105,6 @@ It verifies absence. Local keys, inputs, state files, and downloads stay.
 
 Without `--force-delete-secret`, the secret keeps seven-day recovery and the
 checker does not report a clean deployment. Keep state until deletion completes.
-For the old deployment, use `--env legacy`; its files remain in their old paths.
 
 Terraform deletes tracked resources, not all resources in an account. The shared
 checker uses a Terraform resource manifest plus AWS checks for images, active
@@ -146,6 +146,7 @@ Downloads refuse to overwrite files. Saved partial output remains available.
 - Cancellation can leave an `unknown` outcome. Recovery is not yet tested.
 - No uploads, resume, local worker simulation, or per-run environment changes.
 
-The prior cloud math test passed on 2026-09-02 in the legacy account. The new
-multi-account lifecycle test has not yet been run against AWS.
+The prior cloud math test passed on 2026-09-02 against the original
+single-account deployment. The new multi-account lifecycle test has not yet
+been run against AWS.
 See [PLAN.md](PLAN.md) for decisions and verification records.

@@ -2,12 +2,12 @@
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import ClientError
 
 ROOT = Path(__file__).resolve().parent.parent
 TERRAFORM_OUTPUT = "cloudbox"
@@ -43,7 +43,7 @@ class CloudboxError(Exception):
 
 
 def timestamp():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def json_bytes(value):
@@ -57,36 +57,66 @@ def emit(value):
 def error_record(error):
     # Do not expose SDK messages: they can contain request values.
     if isinstance(error, CloudboxError):
-        return {"ok": False, "error": {"code": error.code, "message": str(error)}, **error.details}
+        return {
+            "ok": False,
+            "error": {"code": error.code, "message": str(error)},
+            **error.details,
+        }
     if isinstance(error, ClientError):
-        return {"ok": False, "error": {
-            "code": error.response.get("Error", {}).get("Code", "aws_error"),
-            "operation": error.operation_name,
-        }}
+        return {
+            "ok": False,
+            "error": {
+                "code": error.response.get("Error", {}).get("Code", "aws_error"),
+                "operation": error.operation_name,
+            },
+        }
     return {"ok": False, "error": {"code": type(error).__name__}}
 
 
 def load_deployment(environment):
     # Read only the named output; do not refresh state or cache credentials.
     try:
-        data = json.loads(environment.terraform(
-            environment.main_root, "output", "-json", TERRAFORM_OUTPUT, capture=True,
-        ))
+        data = json.loads(
+            environment.terraform(
+                environment.main_root,
+                "output",
+                "-json",
+                TERRAFORM_OUTPUT,
+                capture=True,
+            )
+        )
         config = json.loads(environment.input_path.read_bytes())["deployment"]
     except (OSError, ValueError, KeyError, TypeError) as error:
-        raise CloudboxError("deployment_unavailable", "Read the initialized Terraform output first.") from error
+        raise CloudboxError(
+            "deployment_unavailable", "Read the initialized Terraform output first."
+        ) from error
     required = (
-        "aws_account_id", "aws_region", "aws_profile", "project_name", "bucket_name",
-        "provisioner_role_arn", "run_data_role_arn", "runtime_role_arn",
-        "openrouter_secret_arn", "log_group_name", "image_arn",
+        "aws_account_id",
+        "aws_region",
+        "aws_profile",
+        "project_name",
+        "bucket_name",
+        "provisioner_role_arn",
+        "run_data_role_arn",
+        "runtime_role_arn",
+        "openrouter_secret_arn",
+        "log_group_name",
+        "image_arn",
     )
-    if not isinstance(data, dict) or any(not isinstance(data.get(key), str) or not data[key] for key in required):
+    if not isinstance(data, dict) or any(
+        not isinstance(data.get(key), str) or not data[key] for key in required
+    ):
         raise CloudboxError("deployment_invalid", "The Terraform output is incomplete.")
     if not re.fullmatch(r"\d{12}", data["aws_account_id"]):
         raise CloudboxError("deployment_invalid", "The AWS account ID is invalid.")
     identity_fields = ("aws_account_id", "aws_region", "aws_profile", "project_name")
-    if not isinstance(config, dict) or any(data[field] != config.get(field) for field in identity_fields):
-        raise CloudboxError("state_mismatch", "Terraform output does not match the selected environment inputs.")
+    if not isinstance(config, dict) or any(
+        data[field] != config.get(field) for field in identity_fields
+    ):
+        raise CloudboxError(
+            "state_mismatch",
+            "Terraform output does not match the selected environment inputs.",
+        )
     return data
 
 
@@ -102,11 +132,15 @@ def credential_session(credentials, region):
 def check_account(session, deployment):
     account = session.client("sts", config=SDK_CONFIG).get_caller_identity()["Account"]
     if account != deployment["aws_account_id"]:
-        raise CloudboxError("wrong_account", "AWS credentials belong to another account.")
+        raise CloudboxError(
+            "wrong_account", "AWS credentials belong to another account."
+        )
 
 
 def operator_session(deployment, *, provisioner=True):
-    session = boto3.Session(profile_name=deployment["aws_profile"], region_name=deployment["aws_region"])
+    session = boto3.Session(
+        profile_name=deployment["aws_profile"], region_name=deployment["aws_region"]
+    )
     check_account(session, deployment)
     if not provisioner:
         return session
@@ -132,12 +166,18 @@ def scoped_data_credentials(session, deployment, run_id):
     policy = {
         "Version": AWS_POLICY_VERSION,
         "Statement": [
-            {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": f"{bucket_arn}/{prefix}*"},
+            {
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:PutObject"],
+                "Resource": f"{bucket_arn}/{prefix}*",
+            },
         ],
     }
     response = session.client("sts", config=SDK_CONFIG).assume_role(
-        RoleArn=deployment["run_data_role_arn"], RoleSessionName=f"run-{run_id}",
-        DurationSeconds=ROLE_SESSION_SECONDS, Policy=json.dumps(policy, separators=(",", ":")),
+        RoleArn=deployment["run_data_role_arn"],
+        RoleSessionName=f"run-{run_id}",
+        DurationSeconds=ROLE_SESSION_SECONDS,
+        Policy=json.dumps(policy, separators=(",", ":")),
     )
     credentials = response["Credentials"]
     check_account(credential_session(credentials, deployment["aws_region"]), deployment)
@@ -145,8 +185,13 @@ def scoped_data_credentials(session, deployment, run_id):
 
 
 def put_record(s3, bucket, key, value, *, exclusive=False):
-    arguments = {"Bucket": bucket, "Key": key, "Body": json_bytes(value),
-                 "ContentType": JSON_CONTENT_TYPE, "ServerSideEncryption": S3_ENCRYPTION}
+    arguments = {
+        "Bucket": bucket,
+        "Key": key,
+        "Body": json_bytes(value),
+        "ContentType": JSON_CONTENT_TYPE,
+        "ServerSideEncryption": S3_ENCRYPTION,
+    }
     if exclusive:
         arguments["IfNoneMatch"] = "*"
     try:
@@ -172,7 +217,9 @@ def get_record(s3, bucket, key):
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, ValueError) as error:
-        raise CloudboxError("record_invalid", "A run record is not valid JSON.") from error
+        raise CloudboxError(
+            "record_invalid", "A run record is not valid JSON."
+        ) from error
     if not isinstance(value, dict):
         raise CloudboxError("record_invalid", "A run record must be an object.")
     return value
@@ -190,15 +237,34 @@ def validate_spec(value):
     allowed = {"schema_version", "prompt", "model", "timeout_seconds"}
     if not isinstance(value, dict) or value.keys() - allowed:
         raise CloudboxError("invalid_spec", "The job contains unsupported fields.")
-    if type(value.get("schema_version")) is not int or value["schema_version"] != SCHEMA_VERSION:
+    if (
+        type(value.get("schema_version")) is not int
+        or value["schema_version"] != SCHEMA_VERSION
+    ):
         raise CloudboxError("invalid_spec", "The schema version is not supported.")
     prompt = value.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARACTERS:
-        raise CloudboxError("invalid_prompt", f"Supply 1 to {MAX_PROMPT_CHARACTERS} prompt characters.")
+    if (
+        not isinstance(prompt, str)
+        or not prompt.strip()
+        or len(prompt) > MAX_PROMPT_CHARACTERS
+    ):
+        raise CloudboxError(
+            "invalid_prompt", f"Supply 1 to {MAX_PROMPT_CHARACTERS} prompt characters."
+        )
     model = value.get("model")
-    if not isinstance(model, str) or not model or any(character.isspace() for character in model):
+    if (
+        not isinstance(model, str)
+        or not model
+        or any(character.isspace() for character in model)
+    ):
         raise CloudboxError("invalid_model", "Supply a model ID without spaces.")
     timeout = value.get("timeout_seconds")
-    if type(timeout) is not int or not MIN_TIMEOUT_SECONDS <= timeout <= MAX_TIMEOUT_SECONDS:
-        raise CloudboxError("invalid_timeout", f"The timeout must be {MIN_TIMEOUT_SECONDS} to {MAX_TIMEOUT_SECONDS} seconds.")
+    if (
+        type(timeout) is not int
+        or not MIN_TIMEOUT_SECONDS <= timeout <= MAX_TIMEOUT_SECONDS
+    ):
+        raise CloudboxError(
+            "invalid_timeout",
+            f"The timeout must be {MIN_TIMEOUT_SECONDS} to {MAX_TIMEOUT_SECONDS} seconds.",
+        )
     return value

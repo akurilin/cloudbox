@@ -1,22 +1,29 @@
 """Rebuild, test, and remove the disposable test deployment."""
 
 import argparse
-from contextlib import redirect_stdout
 import io
 import json
-from pathlib import Path
 import sys
 import uuid
+from contextlib import redirect_stdout
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cloudbox.common import ROOT, CloudboxError, emit, error_record, operator_session, timestamp
+from cloudbox.common import (
+    ROOT,
+    CloudboxError,
+    emit,
+    error_record,
+    operator_session,
+    timestamp,
+)
 from cloudbox.environments import get_environment
-from cloudbox.resources import check_resources
+from cloudbox.resources import check_resources, state_remains
 from scripts import setup, smoke_cloud, teardown
 
 TEST_ENVIRONMENT = "test"
-PROTECTED_ENVIRONMENTS = ("prod", "legacy")
+PROD_ENVIRONMENT = "prod"
 IDENTITY_FIELDS = ("aws_account_id", "aws_region", "aws_profile", "project_name")
 REPORT_VERSION = 1
 INTERRUPTED_EXIT_CODE = 130
@@ -24,25 +31,34 @@ TEST_NAME = "cloud_lifecycle"
 
 
 def test_configuration(environment, expected=None):
-    # Refuse prod, reused account IDs, or changed targets before cloud changes.
+    # Check account separation and unchanged targets before cloud changes.
     if environment.name != TEST_ENVIRONMENT:
         raise CloudboxError("test_only", "The lifecycle test accepts only --env test.")
     config = setup.read_config(environment)[0]["deployment"]
     if expected and any(config[field] != expected[field] for field in IDENTITY_FIELDS):
-        raise CloudboxError("test_target_changed", "The test account or deployment settings changed. Stop and inspect them.")
-    for name in PROTECTED_ENVIRONMENTS:
-        protected = get_environment(name)
-        if name == "legacy" and not protected.input_path.exists():
-            for root in protected.roots:
-                path = protected.state_path(root)
-                if path.exists():
-                    state = json.loads(path.read_bytes())
-                    if state.get("resources") or state.get("outputs"):
-                        raise CloudboxError("legacy_config_missing", "Restore the legacy input file before the lifecycle test.")
-            continue
-        other = setup.read_config(protected)[0]["deployment"]
-        if config["aws_account_id"] == other["aws_account_id"]:
-            raise CloudboxError("test_account_shared", f"Test must use a different account from {name}.")
+        raise CloudboxError(
+            "test_target_changed",
+            "The test account or deployment settings changed. Stop and inspect them.",
+        )
+    prod = get_environment(PROD_ENVIRONMENT)
+    if not prod.input_path.exists():
+        # Missing inputs are safe only when no saved prod deployment remains.
+        try:
+            if any(state_remains(prod, root) for root in prod.roots):
+                raise CloudboxError(
+                    "prod_config_missing",
+                    "Restore the prod input file before the lifecycle test.",
+                )
+        except (OSError, ValueError, AttributeError) as error:
+            raise CloudboxError(
+                "invalid_state", "Check the saved prod state before the lifecycle test."
+            ) from error
+        return config
+    other = setup.read_config(prod)[0]["deployment"]
+    if config["aws_account_id"] == other["aws_account_id"]:
+        raise CloudboxError(
+            "test_account_shared", "Test must use a different account from prod."
+        )
     return config
 
 
@@ -52,21 +68,32 @@ class Report:
         self.directory = ROOT / ".cloudbox" / "e2e" / environment.name / identity
         self.directory.mkdir(parents=True, exist_ok=False)
         self.path = self.directory / "report.json"
-        self.data = {"schema_version": REPORT_VERSION, "test": TEST_NAME,
-                     "environment": environment.name, "execution_id": identity,
-                     "started_at": timestamp(), "status": "running", "stages": [],
-                     "primary_failure": None, "cleanup_failure": None,
-                     "scope": "Cloudbox resources, not unrelated resources or AWS service history."}
+        self.data = {
+            "schema_version": REPORT_VERSION,
+            "test": TEST_NAME,
+            "environment": environment.name,
+            "execution_id": identity,
+            "started_at": timestamp(),
+            "status": "running",
+            "stages": [],
+            "primary_failure": None,
+            "cleanup_failure": None,
+            "scope": "Cloudbox resources, not unrelated resources or AWS service history.",
+        }
         self.output = sys.stdout
         self.storage_error = None
         self.save()
         if self.storage_error:
-            raise CloudboxError("report_unavailable", "The local test report could not be saved.")
+            raise CloudboxError(
+                "report_unavailable", "The local test report could not be saved."
+            )
 
     def save(self):
         # A report write failure must not prevent cloud cleanup.
         try:
-            self.path.write_text(json.dumps(self.data, indent=2) + "\n", encoding="utf-8")
+            self.path.write_text(
+                json.dumps(self.data, indent=2) + "\n", encoding="utf-8"
+            )
         except OSError as error:
             self.storage_error = error_record(error)["error"]
 
@@ -75,7 +102,16 @@ class Report:
         self.data["stages"].append(value)
         self.save()
         try:
-            self.output.write(json.dumps({"test": TEST_NAME, "environment": self.data["environment"], **value}) + "\n")
+            self.output.write(
+                json.dumps(
+                    {
+                        "test": TEST_NAME,
+                        "environment": self.data["environment"],
+                        **value,
+                    }
+                )
+                + "\n"
+            )
             self.output.flush()
         except OSError:
             # A closed output pipe must not leave test resources running.
@@ -96,7 +132,10 @@ class StageOutput(io.TextIOBase):
                 continue
             record = json.loads(line)
             if not isinstance(record, dict):
-                raise CloudboxError("invalid_stage_output", "A lifecycle stage did not return a JSON object.")
+                raise CloudboxError(
+                    "invalid_stage_output",
+                    "A lifecycle stage did not return a JSON object.",
+                )
             self.records.append(record)
             self.report.event(self.stage, {"status": "output", "result": record})
         return len(text)
@@ -108,18 +147,34 @@ def run_stage(report, name, entrypoint, arguments):
     with redirect_stdout(output):
         exit_code = entrypoint(arguments)
     result = output.records[-1] if output.records else None
-    report.event(name, {"status": "passed" if exit_code == 0 else "failed", "exit_code": exit_code})
+    report.event(
+        name,
+        {"status": "passed" if exit_code == 0 else "failed", "exit_code": exit_code},
+    )
     if exit_code != 0 or not result or result.get("ok") is not True:
-        raise CloudboxError("stage_failed", f"The {name} stage failed.",
-                            stage=name, exit_code=exit_code, result=result)
+        raise CloudboxError(
+            "stage_failed",
+            f"The {name} stage failed.",
+            stage=name,
+            exit_code=exit_code,
+            result=result,
+        )
     return result
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Rebuild, test, and remove Cloudbox test resources without approval.")
-    parser.add_argument("--env", choices=(TEST_ENVIRONMENT,), default=TEST_ENVIRONMENT,
-                        help="Defaults to test; other environments are rejected.")
-    parser.add_argument("--env-file", type=Path, help="OpenRouter key file; defaults to .env.test.")
+    parser = argparse.ArgumentParser(
+        description="Rebuild, test, and remove Cloudbox test resources without approval."
+    )
+    parser.add_argument(
+        "--env",
+        choices=(TEST_ENVIRONMENT,),
+        default=TEST_ENVIRONMENT,
+        help="Defaults to test; other environments are rejected.",
+    )
+    parser.add_argument(
+        "--env-file", type=Path, help="OpenRouter key file; defaults to .env.test."
+    )
     # Accept old commands; test resources no longer need interactive approval.
     parser.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
@@ -130,15 +185,23 @@ def main(argv=None):
     try:
         config = test_configuration(environment)
         report = Report(environment)
-        report.data.update({"account_id": config["aws_account_id"], "region": config["aws_region"],
-                            "project": config["project_name"]})
+        report.data.update(
+            {
+                "account_id": config["aws_account_id"],
+                "region": config["aws_region"],
+                "project": config["project_name"],
+            }
+        )
         operator_session(config, provisioner=False)
         initial = check_resources(environment)
         report.data["before"] = initial
         report.save()
-        print(f"Test account: {config['aws_account_id']} ({config['aws_region']})\n"
-              "Remove existing Cloudbox test resources; rebuild; run one math job; remove test resources and the secret.\n"
-              "AWS and OpenRouter charges apply. Do not use this test account during the test.", file=sys.stderr)
+        print(
+            f"Test account: {config['aws_account_id']} ({config['aws_region']})\n"
+            "Remove existing Cloudbox test resources; rebuild; run one math job; remove test resources and the secret.\n"
+            "AWS and OpenRouter charges apply. Do not use this test account during the test.",
+            file=sys.stderr,
+        )
         test_configuration(environment, config)
         if not initial["clean"] or not initial["local_state_empty"]:
             # Reset tracked test resources; teardown retains state and ownership guards.
@@ -155,8 +218,17 @@ def main(argv=None):
         run_stage(report, stage, setup.main, setup_arguments)
         stage = "math"
         test_configuration(environment, config)
-        report.data["math"] = run_stage(report, stage, smoke_cloud.main,
-                                        ["--env", environment.name, "--output-directory", str(report.directory / "run")])
+        report.data["math"] = run_stage(
+            report,
+            stage,
+            smoke_cloud.main,
+            [
+                "--env",
+                environment.name,
+                "--output-directory",
+                str(report.directory / "run"),
+            ],
+        )
     except (Exception, KeyboardInterrupt) as error:
         failure = {"stage": stage, **error_record(error)}
         if report is None:
@@ -172,29 +244,63 @@ def main(argv=None):
                 run_stage(report, "teardown", teardown.main, teardown_arguments)
             except (Exception, KeyboardInterrupt) as error:
                 report.data["cleanup_failure"] = error_record(error)
-                report.event("teardown", {"status": "failed", "failure": error_record(error)})
+                report.event(
+                    "teardown", {"status": "failed", "failure": error_record(error)}
+                )
         if report is not None and (reset_started or setup_started):
             # Inspect a failed reset without repeating its destructive operation.
             try:
                 test_configuration(environment, config)
                 final = check_resources(environment)
                 report.data["after"] = final
-                report.event("verify_empty", {"status": "passed" if final["clean"] else "failed", "clean": final["clean"]})
+                report.event(
+                    "verify_empty",
+                    {
+                        "status": "passed" if final["clean"] else "failed",
+                        "clean": final["clean"],
+                    },
+                )
                 if not final["clean"]:
                     report.data["cleanup_failure"] = report.data["cleanup_failure"] or {
-                        "error": {"code": "resources_remain", "message": "Test resources or state remain."}}
+                        "error": {
+                            "code": "resources_remain",
+                            "message": "Test resources or state remain.",
+                        }
+                    }
             except (Exception, KeyboardInterrupt) as error:
-                report.data["cleanup_failure"] = report.data["cleanup_failure"] or error_record(error)
-                report.event("verify_empty", {"status": "failed", "failure": error_record(error)})
-    success = setup_started and not report.data["primary_failure"] and not report.data["cleanup_failure"] and not report.storage_error
-    report.data.update({"status": "passed" if success else "failed", "finished_at": timestamp(),
-                        "report_error": report.storage_error})
+                report.data["cleanup_failure"] = report.data[
+                    "cleanup_failure"
+                ] or error_record(error)
+                report.event(
+                    "verify_empty", {"status": "failed", "failure": error_record(error)}
+                )
+    success = (
+        setup_started
+        and not report.data["primary_failure"]
+        and not report.data["cleanup_failure"]
+        and not report.storage_error
+    )
+    report.data.update(
+        {
+            "status": "passed" if success else "failed",
+            "finished_at": timestamp(),
+            "report_error": report.storage_error,
+        }
+    )
     report.save()
     success = success and not report.storage_error
-    emit({"ok": success, "test": TEST_NAME, "environment": environment.name,
-          "status": "passed" if success else "failed", "report_path": str(report.path),
-          "clean": report.data.get("after", {}).get("clean"),
-          "primary_failure": report.data["primary_failure"], "cleanup_failure": report.data["cleanup_failure"]})
+    emit(
+        {
+            "ok": success,
+            "test": TEST_NAME,
+            "environment": environment.name,
+            "status": "passed" if success else "failed",
+            "report_path": str(report.path),
+            "clean": report.data.get("after", {}).get("clean"),
+            "primary_failure": report.data["primary_failure"],
+            "cleanup_failure": report.data["cleanup_failure"],
+        }
+    )
     return 0 if success else 1
 
 

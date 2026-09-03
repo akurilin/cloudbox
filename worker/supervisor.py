@@ -7,7 +7,7 @@ import signal
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import boto3
@@ -30,7 +30,9 @@ APPLICATION_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = Path("/tmp/cloudbox")
 TOKEN_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
 KNOWN_TOOLS = {"read", "bash", "edit", "write", "grep", "find", "ls"}
-AWS_CONFIG = Config(connect_timeout=2, read_timeout=5, retries={"total_max_attempts": 1})
+AWS_CONFIG = Config(
+    connect_timeout=2, read_timeout=5, retries={"total_max_attempts": 1}
+)
 LOG_LOCK = threading.Lock()
 AGENT_CONTRACT = (
     "You are an unattended worker. Complete the user's task in the current directory. "
@@ -43,7 +45,7 @@ AGENT_CONTRACT = (
 
 
 def utc_now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def emit(run_id, event_type, **metadata):
@@ -57,9 +59,11 @@ def put_json(s3, bucket, key, value):
     # The first terminal record wins if cancel and normal completion race.
     try:
         s3.put_object(
-            Bucket=bucket, Key=key,
+            Bucket=bucket,
+            Key=key,
             Body=json.dumps(value, allow_nan=False).encode(),
-            ContentType="application/json", IfNoneMatch="*",
+            ContentType="application/json",
+            IfNoneMatch="*",
         )
         return True
     except ClientError as error:
@@ -69,7 +73,11 @@ def put_json(s3, bucket, key, value):
 
 
 def number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 class PiEvents:
@@ -104,13 +112,20 @@ class PiEvents:
             if identity is not None:
                 self.seen_messages.add(identity)
             usage = message.get("usage", {})
-            selected_usage = {key: usage[key] for key in TOKEN_FIELDS if number(usage.get(key))}
+            selected_usage = {
+                key: usage[key] for key in TOKEN_FIELDS if number(usage.get(key))
+            }
             for key, value in selected_usage.items():
                 self.usage[key] += value
             cost = usage.get("cost", {}).get("total")
             if number(cost):
                 self.usage["estimated_cost_usd"] += cost
-            emit(self.run_id, "model_message", stop_reason=message.get("stopReason"), usage=selected_usage)
+            emit(
+                self.run_id,
+                "model_message",
+                stop_reason=message.get("stopReason"),
+                usage=selected_usage,
+            )
         elif event_type in {"tool_execution_start", "tool_execution_end"}:
             tool_id = event.get("toolCallId")
             tool_name = event.get("toolName")
@@ -125,15 +140,26 @@ class PiEvents:
                 if started is not None:
                     metadata["duration_seconds"] = round(time.monotonic() - started, 3)
             emit(self.run_id, event_type, **metadata)
-        elif event_type in {"agent_start", "agent_settled", "auto_retry_start", "auto_retry_end"}:
-            metadata = {key: event[key] for key in ("attempt", "success") if key in event}
+        elif event_type in {
+            "agent_start",
+            "agent_settled",
+            "auto_retry_start",
+            "auto_retry_end",
+        }:
+            metadata = {
+                key: event[key] for key in ("attempt", "success") if key in event
+            }
             emit(self.run_id, event_type, **metadata)
 
     def completion(self):
         message = self.final_message
         if not message or message.get("stopReason") != "stop":
             return "failed", "agent_terminal_error", None
-        text = "".join(item.get("text", "") for item in message.get("content", []) if item.get("type") == "text")
+        text = "".join(
+            item.get("text", "")
+            for item in message.get("content", [])
+            if item.get("type") == "text"
+        )
         try:
             declaration = json.loads(text)
         except (ValueError, TypeError):
@@ -174,8 +200,11 @@ def run_script(name, workspace, deadline, run_id):
         if remaining <= 0:
             raise subprocess.TimeoutExpired(name, 0)
         process = subprocess.Popen(
-            ["/bin/sh", str(APPLICATION_DIR / name)], cwd=workspace,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            ["/bin/sh", str(APPLICATION_DIR / name)],
+            cwd=workspace,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         exit_code = process.wait(timeout=remaining)
         emit(run_id, "lifecycle_end", script=name, exit_code=exit_code)
@@ -188,22 +217,45 @@ def run_script(name, workspace, deadline, run_id):
 def run_pi(spec, key, workspace, deadline, run_id):
     events = PiEvents(run_id)
     environment = os.environ.copy()
-    environment.update({
-        "OPENROUTER_API_KEY": key,
-        "PI_CODING_AGENT_DIR": str(workspace / ".pi" / "agent"),
-        "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1",
-        "CLOUDBOX_RESULT_PATH": str(workspace / OUTPUT_PATH),
-    })
+    environment.update(
+        {
+            "OPENROUTER_API_KEY": key,
+            "PI_CODING_AGENT_DIR": str(workspace / ".pi" / "agent"),
+            "PI_OFFLINE": "1",
+            "PI_SKIP_VERSION_CHECK": "1",
+            "CLOUDBOX_RESULT_PATH": str(workspace / OUTPUT_PATH),
+        }
+    )
     command = [
-        "pi", "--mode", "json", "--no-session", "--offline",
-        "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
-        "--no-context-files", "--no-approve", "--provider", PROVIDER,
-        "--model", spec["model"], "--append-system-prompt", AGENT_CONTRACT,
+        "pi",
+        "--mode",
+        "json",
+        "--no-session",
+        "--offline",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--no-approve",
+        "--provider",
+        PROVIDER,
+        "--model",
+        spec["model"],
+        "--append-system-prompt",
+        AGENT_CONTRACT,
     ]
     process = subprocess.Popen(
-        command, cwd=workspace, env=environment, stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-        errors="replace", start_new_session=True,
+        command,
+        cwd=workspace,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
     )
 
     def drain_stderr():
@@ -219,7 +271,9 @@ def run_pi(spec, key, workspace, deadline, run_id):
             pass
 
     readers = [
-        threading.Thread(target=events.read_stdout, args=(process.stdout,), daemon=True),
+        threading.Thread(
+            target=events.read_stdout, args=(process.stdout,), daemon=True
+        ),
         threading.Thread(target=drain_stderr, daemon=True),
         threading.Thread(target=send_prompt, daemon=True),
     ]
@@ -268,7 +322,11 @@ def validate_spec(spec):
     if spec.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("invalid_spec")
     prompt = spec.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARACTERS:
+    if (
+        not isinstance(prompt, str)
+        or not prompt.strip()
+        or len(prompt) > MAX_PROMPT_CHARACTERS
+    ):
         raise ValueError("invalid_prompt")
     if not isinstance(spec.get("model"), str) or not spec["model"]:
         raise ValueError("invalid_model")
@@ -288,9 +346,14 @@ def supervise(microvm_id, payload):
     s3 = None
     events = None
     result = {
-        "schema_version": SCHEMA_VERSION, "run_id": run_id, "status": "failed",
-        "reason": "worker_error", "started_at": started_at, "exit_code": None,
-        "artifact_key": None, "artifact_complete": False,
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "status": "failed",
+        "reason": "worker_error",
+        "started_at": started_at,
+        "exit_code": None,
+        "artifact_key": None,
+        "artifact_complete": False,
         "agent_version": os.environ.get("PI_VERSION"),
     }
     # Create AWS clients after restore. Data credentials cannot grant runtime actions.
@@ -300,7 +363,8 @@ def supervise(microvm_id, payload):
         data_session = boto3.Session(
             aws_access_key_id=credentials["AccessKeyId"],
             aws_secret_access_key=credentials["SecretAccessKey"],
-            aws_session_token=credentials["SessionToken"], region_name=payload["aws_region"],
+            aws_session_token=credentials["SessionToken"],
+            region_name=payload["aws_region"],
         )
         s3 = data_session.client("s3", config=AWS_CONFIG)
         response = s3.get_object(Bucket=bucket, Key=f"{prefix}/spec.json")
@@ -313,12 +377,21 @@ def supervise(microvm_id, payload):
         spec = json.loads(spec_bytes)
         validate_spec(spec)
         deadline = started + spec["timeout_seconds"]
-        put_json(s3, bucket, f"{prefix}/launch.json", {
-            "schema_version": SCHEMA_VERSION, "run_id": run_id, "microvm_id": microvm_id,
-            "image_arn": spec["image_arn"], "image_version": spec["image_version"],
-            "log_group_name": payload["log_group_name"], "log_stream_name": run_id,
-            "started_at": started_at,
-        })
+        put_json(
+            s3,
+            bucket,
+            f"{prefix}/launch.json",
+            {
+                "schema_version": SCHEMA_VERSION,
+                "run_id": run_id,
+                "microvm_id": microvm_id,
+                "image_arn": spec["image_arn"],
+                "image_version": spec["image_version"],
+                "log_group_name": payload["log_group_name"],
+                "log_stream_name": run_id,
+                "started_at": started_at,
+            },
+        )
         workspace.mkdir(parents=True, exist_ok=False)
         (workspace / OUTPUT_PATH.parent).mkdir()
         emit(run_id, "worker_start", microvm_id=microvm_id)
@@ -330,7 +403,9 @@ def supervise(microvm_id, payload):
             raise ValueError("secret_must_be_plain_api_key")
         work_deadline = deadline - CLEANUP_SECONDS
         run_script("startup.sh", workspace, work_deadline, run_id)
-        exit_code, timed_out, events = run_pi(spec, key, workspace, work_deadline, run_id)
+        exit_code, timed_out, events = run_pi(
+            spec, key, workspace, work_deadline, run_id
+        )
         result["exit_code"] = exit_code
         if timed_out:
             result.update(status="timed_out", reason="deadline")
@@ -355,7 +430,12 @@ def supervise(microvm_id, payload):
                 emit(run_id, "output_validation", outcome=output_error or "valid")
                 if body is not None:
                     artifact_key = f"{prefix}/{OUTPUT_PATH}"
-                    s3.put_object(Bucket=bucket, Key=artifact_key, Body=body, ContentType="application/json")
+                    s3.put_object(
+                        Bucket=bucket,
+                        Key=artifact_key,
+                        Body=body,
+                        ContentType="application/json",
+                    )
                     result["artifact_key"] = artifact_key
                     result["artifact_complete"] = result["status"] == "succeeded"
                     emit(run_id, "output_uploaded", size_bytes=len(body))
@@ -365,7 +445,9 @@ def supervise(microvm_id, payload):
             emit(run_id, "output_error", error_type=type(error).__name__)
         try:
             if workspace.exists():
-                run_script("teardown.sh", workspace, deadline - STOP_GRACE_SECONDS, run_id)
+                run_script(
+                    "teardown.sh", workspace, deadline - STOP_GRACE_SECONDS, run_id
+                )
         except Exception as error:
             result["cleanup_error"] = type(error).__name__
             emit(run_id, "cleanup_error", error_type=type(error).__name__)

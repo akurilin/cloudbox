@@ -13,7 +13,7 @@ terraform {
 }
 
 variable "deployment" {
-  description = "Use -var-file=../cloudbox.auto.tfvars.json; do not copy settings."
+  description = "Use the wrapper-selected -var-file; do not copy settings."
   type        = any
 }
 

@@ -23,16 +23,16 @@ Each environment reuses these Terraform roots:
 - This directory: restricted provisioner; storage, logs, secret metadata, workers.
 - `modules/policy/`: shared names, permissions, and resource inventory contract.
 
-`test` and `prod` use separate local backend paths and `TF_DATA_DIR` directories
-under `.cloudbox/environments/<env>/`. Inputs live in
-`infra/environments/<env>.tfvars.json`. Keep inputs and state backups private.
-The wrappers check account identity and reject state from another account or
-region. There is no shared state or deployment-output cache.
+`test` and `prod` use separate local backend paths and
+`TF_DATA_DIR` directories under `.cloudbox/environments/<env>/`. Inputs live in
+`infra/environments/<env>.tfvars.json`. Copy
+`infra/environments/deployment.tfvars.example.json` and replace its placeholders.
+The real files are Git-ignored. Keep inputs and state
+backups private. The wrappers check account identity and reject state from
+another account or region. There is no shared state or deployment-output cache.
 
-`--env legacy` retains the existing `infra/cloudbox.auto.tfvars.json` input and
-the two original state paths. Its working directory is also isolated. Do not
-copy that state to `test` or `prod`. Generated directories link shared Terraform
-source files; they never link another environment's variable or state files.
+Generated directories link shared Terraform source files; they never link
+another environment's variable or state files.
 
 Terraform owns no secret value. The setup helper writes the OpenRouter key
 directly to Secrets Manager. The image script owns MicroVM images and source
