@@ -2,9 +2,11 @@
 
 import io
 import json
+import socket
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -23,6 +25,7 @@ RUN_ID = "45e3a9d8-f176-4f28-bd66-622bcd744272"
 REPORT = {
     "status": "completed",
     "summary": "Calculation checked.",
+    "response": "The answer is 42.",
     "result": {"answer": 42},
 }
 
@@ -113,16 +116,41 @@ class FinishEventsTests(unittest.TestCase):
         self.events.final_message = {"stopReason": "error"}
         self.assertEqual(("failed", "agent_terminal_error"), self.events.completion())
 
+    def test_response_is_nonempty(self):
+        for response in ("", " \n\t", None, 42, {}):
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                supervisor.validate_report({**REPORT, "response": response})
+        response = "Result: 42. https://example.test/file?X-Amz-Signature=abc\n"
+        self.assertEqual(
+            response,
+            supervisor.validate_report({**REPORT, "response": response})["response"],
+        )
+
+    def test_missing_response_cannot_complete_a_new_run(self):
+        report = {key: value for key, value in REPORT.items() if key != "response"}
+        with self.assertRaises(ValueError):
+            supervisor.validate_report(report)
+        finish(self.events, report)
+        self.assertIsNone(self.events.report)
+        self.assertEqual(("failed", "missing_finish"), self.events.completion())
+
 
 class FinishStorageTests(unittest.TestCase):
     def run_worker(
-        self, *, report=REPORT, exit_code=0, timed_out=False, save_error=None
+        self,
+        *,
+        report=REPORT,
+        exit_code=0,
+        timed_out=False,
+        save_error=None,
+        publish_file=False,
+        agent_error=None,
     ):
         events = supervisor.PiEvents(RUN_ID)
         with patch.object(supervisor, "emit"):
             finish(events, report)
         spec = {
-            "schema_version": 3,
+            "schema_version": supervisor.SCHEMA_VERSION,
             "prompt": "Calculate a value.",
             "model": "test/model",
             "timeout_seconds": 600,
@@ -130,7 +158,7 @@ class FinishStorageTests(unittest.TestCase):
             "image_version": "1.0",
         }
         payload = {
-            "schema_version": 3,
+            "schema_version": supervisor.SCHEMA_VERSION,
             "run_id": RUN_ID,
             "bucket_name": "bucket",
             "aws_region": "us-east-1",
@@ -141,9 +169,30 @@ class FinishStorageTests(unittest.TestCase):
                 "SecretAccessKey": "secret",
                 "SessionToken": "token",
             },
+            "data_credentials_expires_at": (
+                datetime.now(UTC) + timedelta(hours=1)
+            ).isoformat(),
         }
         s3, runtime = Mock(), Mock()
         s3.get_object.return_value = {"Body": io.BytesIO(json.dumps(spec).encode())}
+        s3.generate_presigned_url.return_value = (
+            "https://bucket.s3.test/file?X-Amz-Signature=private"
+        )
+
+        def run_agent(*arguments):
+            if publish_file:
+                workspace = arguments[2]
+                (workspace / "output" / "answer.txt").write_text("42\n")
+                socket_path = arguments[5]["CLOUDBOX_PUBLISH_SOCKET"]
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(5)
+                    connection.connect(socket_path)
+                    connection.sendall(b'{"path":"output/answer.txt"}\n')
+                    reply = json.loads(connection.recv(8192))
+                self.assertIn("artifact", reply)
+            if agent_error is not None:
+                raise agent_error
+            return exit_code, timed_out, events
 
         def save(**arguments):
             if save_error and arguments["Key"].endswith("/result.json"):
@@ -163,9 +212,7 @@ class FinishStorageTests(unittest.TestCase):
             patch.object(supervisor, "WORKSPACE_ROOT", Path(directory)),
             patch.object(supervisor.boto3, "Session", return_value=runtime),
             patch.object(supervisor, "run_script"),
-            patch.object(
-                supervisor, "run_pi", return_value=(exit_code, timed_out, events)
-            ),
+            patch.object(supervisor, "run_pi", side_effect=run_agent),
             patch.object(supervisor, "emit") as logger,
         ):
             supervisor.supervise("vm", payload)
@@ -213,6 +260,7 @@ class FinishStorageTests(unittest.TestCase):
         report = {
             "status": "blocked",
             "summary": "Repository access is missing.",
+            "response": "Repository access is required to complete this task.",
             "result": {"completed_steps": []},
         }
         result, _, _ = self.run_worker(report=report)
@@ -236,6 +284,26 @@ class FinishStorageTests(unittest.TestCase):
         types = [call.args[1] for call in logger.call_args_list]
         self.assertIn("result_upload_error", types)
         self.assertNotIn("result_saved", types)
+
+    def test_published_files_survive_agent_failure_without_finish(self):
+        result, _, _ = self.run_worker(
+            report=None, publish_file=True, agent_error=RuntimeError("agent failed")
+        )
+        self.assertEqual("failed", result["status"])
+        self.assertNotIn("report", result)
+        self.assertEqual(1, len(result["artifacts"]))
+        artifact = result["artifacts"][0]
+        self.assertEqual("answer.txt", artifact["name"])
+        self.assertEqual(3, artifact["bytes"])
+        self.assertIn("X-Amz-Signature=private", artifact["url"])
+
+    def test_report_does_not_control_the_published_file_manifest(self):
+        result, _, _ = self.run_worker(
+            report={**REPORT, "result": {"artifacts": ["untrusted"]}}, publish_file=True
+        )
+        self.assertEqual("succeeded", result["status"])
+        self.assertEqual("answer.txt", result["artifacts"][0]["name"])
+        self.assertEqual(["untrusted"], result["report"]["result"]["artifacts"])
 
 
 if __name__ == "__main__":

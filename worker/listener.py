@@ -6,12 +6,13 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from publish import credential_expiry
 from supervisor import supervise
 
 HOOK_PORT = 8080
 HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
 MAX_HOOK_BODY_BYTES = 64 * 1024
-RUN_SCHEMA_VERSION = 3
+RUN_SCHEMA_VERSION = 5
 RUN_LOCK = threading.Lock()
 active_run = None
 
@@ -68,6 +69,7 @@ class HookHandler(BaseHTTPRequestHandler):
             for field in ("AccessKeyId", "SecretAccessKey", "SessionToken"):
                 if not isinstance(payload["data_credentials"][field], str):
                     raise ValueError("Missing data credentials")
+            credential_expiry(payload["data_credentials_expires_at"])
         except (KeyError, TypeError, ValueError):
             self.respond(HTTPStatus.BAD_REQUEST)
             return

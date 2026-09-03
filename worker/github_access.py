@@ -8,7 +8,7 @@ from datetime import datetime
 
 from github_api import GitHubClient
 
-RUN_SCHEMA_VERSION = 3
+RUN_SCHEMA_VERSION = 5
 API_TIMEOUT_SECONDS = 10
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 GITHUB_PERMISSIONS = {"contents", "issues", "pull_requests", "metadata"}
@@ -23,7 +23,7 @@ GIT_CONFIG = (
 
 
 def validate_github_spec(spec):
-    # Version 3 uses the finish tool; older workers reject these jobs.
+    # Version 5 requires a user response before the agent can finish.
     if (
         type(spec.get("schema_version")) is not int
         or spec["schema_version"] != RUN_SCHEMA_VERSION

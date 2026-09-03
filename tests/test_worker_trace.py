@@ -32,6 +32,104 @@ class ActivityTraceTests(unittest.TestCase):
         lines = stream.getvalue().splitlines()
         return [json.loads(line) for line in lines], lines
 
+    def test_trace_sources_distinguish_agent_and_supervisor(self):
+        records, _ = self.records([{"type": "agent_start"}])
+        self.assertEqual("agent", records[0]["source"])
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            supervisor.emit(RUN_ID, "worker_start")
+        self.assertEqual("supervisor", json.loads(output.getvalue())["source"])
+
+    def test_finish_reminder_logs_only_attempt_without_changing_agent_state(self):
+        reader = supervisor.PiEvents(RUN_ID)
+        reader.final_message = {"role": "assistant", "stopReason": "stop"}
+        reader.usage["input"] = 7
+        previous_message = reader.final_message
+        previous_usage = reader.usage.copy()
+        previous_completion = reader.completion()
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            reader.accept(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "custom",
+                        "customType": "cloudbox_finish_reminder",
+                        "content": "PRIVATE-CONTENT",
+                        "details": {"attempt": 1, "token": "PRIVATE-TOKEN"},
+                    },
+                }
+            )
+        lines = output.getvalue().splitlines()
+        self.assertEqual(1, len(lines))
+        record = json.loads(lines[0])
+        self.assertEqual("finish_reminder", record["event"])
+        self.assertEqual("supervisor", record["source"])
+        self.assertEqual(1, record["attempt"])
+        self.assertEqual(
+            {"run_id", "timestamp", "source", "event", "attempt"}, record.keys()
+        )
+        self.assertNotIn("PRIVATE", lines[0])
+        self.assertIs(previous_message, reader.final_message)
+        self.assertIsNone(reader.report)
+        self.assertEqual(previous_usage, reader.usage)
+        self.assertEqual(previous_completion, reader.completion())
+
+    def test_other_custom_messages_and_invalid_reminder_attempts_are_ignored(self):
+        messages = [
+            {
+                "role": "custom",
+                "customType": "cloudbox_finish_reminder",
+                "details": {"attempt": attempt},
+            }
+            for attempt in (None, False, True, 0, -1, 1.5, "1")
+        ]
+        messages.extend(
+            [
+                {
+                    "role": "custom",
+                    "customType": "another_message",
+                    "details": {"attempt": 1},
+                },
+                {
+                    "role": "custom",
+                    "customType": "cloudbox_finish_reminder",
+                    "details": None,
+                },
+                {
+                    "role": "user",
+                    "customType": "cloudbox_finish_reminder",
+                    "details": {"attempt": 1},
+                },
+            ]
+        )
+        records, _ = self.records(
+            [{"type": "message_end", "message": message} for message in messages]
+        )
+        self.assertEqual([], records)
+
+    def test_signed_download_urls_are_removed_from_activity_logs(self):
+        url = "https://bucket.s3.test/file?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=private-value"
+        records, lines = self.records(
+            [
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "publish",
+                    "toolName": "publish_file",
+                    "isError": False,
+                    "result": {
+                        "content": [{"type": "text", "text": url}],
+                        "details": {"artifact": {"url": url}},
+                    },
+                }
+            ]
+        )
+        self.assertNotIn("private-value", "".join(lines))
+        self.assertEqual("publish_file", records[0]["tool_name"])
+        self.assertEqual(
+            supervisor.REDACTED, records[0]["result"]["details"]["artifact"]["url"]
+        )
+
     def test_reasoning_signatures_images_and_streaming_deltas_are_omitted(self):
         records, lines = self.records(
             [

@@ -23,8 +23,9 @@ from github_access import (
     revoke_token,
     validate_github_spec,
 )
+from publish import ArtifactPublisher, PublishService
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 DEFAULT_TIMEOUT_SECONDS = 600
 MAX_TIMEOUT_SECONDS = 3300
 CLEANUP_SECONDS = 30
@@ -34,8 +35,9 @@ MAX_REPORT_BYTES = 1024 * 1024
 MAX_REPORT_DEPTH = 128
 MAX_SPEC_BYTES = MAX_REPORT_BYTES
 REPORT_STATUSES = {"completed", "blocked"}
-REPORT_FIELDS = {"status", "summary", "result"}
+REPORT_FIELDS = {"status", "summary", "response", "result"}
 FINISH_TOOL = "finish"
+FINISH_REMINDER_TYPE = "cloudbox_finish_reminder"
 MODEL_ERROR_STOPS = {"error", "aborted", "length"}
 STDERR_CHUNK_BYTES = 8192
 MAX_TRACE_TEXT_BYTES = 8 * 1024
@@ -95,6 +97,10 @@ SECRET_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/\s:@]+:[^@\s/]+@", re.IGNORECASE)
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+SIGNED_URL_QUERY_PATTERN = re.compile(
+    r"[?&]X-Amz-(?:Algorithm|Signature|Credential|Security-Token)=", re.IGNORECASE
+)
 REASONING_TAG_PATTERN = re.compile(
     r"<(?:think|thinking|reasoning)>.*?(?:</(?:think|thinking|reasoning)>|$)",
     re.DOTALL | re.IGNORECASE,
@@ -103,17 +109,44 @@ PROVIDER = "openrouter"
 APPLICATION_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = Path("/tmp/cloudbox")
 TOKEN_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
-KNOWN_TOOLS = {"read", "bash", "edit", "write", "grep", "find", "ls", FINISH_TOOL}
+KNOWN_TOOLS = {
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "grep",
+    "find",
+    "ls",
+    FINISH_TOOL,
+    "publish_file",
+}
 AWS_CONFIG = Config(
     connect_timeout=2, read_timeout=5, retries={"total_max_attempts": 1}
+)
+S3_CONFIG = AWS_CONFIG.merge(
+    Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "virtual", "us_east_1_regional_endpoint": "regional"},
+    )
 )
 LOG_LOCK = threading.Lock()
 AGENT_CONTRACT = (
     "You are an unattended worker. Complete the user's task in the current directory. "
-    "When finished, call finish. If blocked, explain what is missing. Do not wait for input. "
+    "When finished, call finish with the full user answer in response or response_file. "
+    "Use result only for optional structured data. If blocked, explain what is missing. Do not wait for input. "
     "Use only access granted to this run. Do not inspect, print, or take credentials, "
     "write AWS records, exploit systems, or bypass access controls. "
     "You can install public dependencies inside the sandbox."
+    " Write files for the user in output/. Call publish_file for each file to get a "
+    "download URL and receipt_path to exact JSON metadata. ZIP directories before publication. "
+    "For published files, read receipt files as JSON in code and copy their URLs and expiry "
+    "into your full UTF-8 answer in an output/ response file. Do not retype signed URLs. "
+    "Also use a response file for long answers. "
+    "Call finish with response_file instead of response; finish saves this file's text, "
+    "so the internal response file does not need publication. Use direct response for short answers. "
+    "If publication fails, "
+    "correct it or report the failure. Other results can use existing external URLs. "
+    "Only published files remain available after the VM stops."
 )
 
 
@@ -130,6 +163,8 @@ def validate_report(report):
         or report["status"] not in REPORT_STATUSES
         or not isinstance(report.get("summary"), str)
         or not report["summary"].strip()
+        or not isinstance(report.get("response"), str)
+        or not report["response"].strip()
         or ("result" in report and not isinstance(report["result"], dict))
     ):
         raise ValueError("invalid_finish_report")
@@ -163,9 +198,15 @@ def validate_report(report):
         raise ValueError("invalid_finish_report") from error
 
 
-def emit(run_id, event_type, **metadata):
+def emit(run_id, event_type, *, source="supervisor", **metadata):
     # Pi content passes the activity filter before managed CloudWatch forwarding.
-    record = {"run_id": run_id, "timestamp": utc_now(), "event": event_type, **metadata}
+    record = {
+        "run_id": run_id,
+        "timestamp": utc_now(),
+        "source": source,
+        "event": event_type,
+        **metadata,
+    }
     with LOG_LOCK:
         print(json.dumps(record, separators=(",", ":"), allow_nan=False), flush=True)
 
@@ -245,6 +286,14 @@ class ActivityFilter:
         for pattern in SECRET_VALUE_PATTERNS:
             value = pattern.sub(REDACTED, value)
         value = URL_CREDENTIAL_PATTERN.sub(r"\1" + REDACTED + "@", value)
+        value = URL_PATTERN.sub(
+            lambda match: (
+                REDACTED
+                if SIGNED_URL_QUERY_PATTERN.search(match.group())
+                else match.group()
+            ),
+            value,
+        )
 
         def redact_assignment(match):
             if secret_field(match.group("key")):
@@ -360,7 +409,12 @@ class PiEvents:
         self.finish_started = set()
 
     def trace(self, event_type, **metadata):
-        emit(self.run_id, event_type, **self.activity_filter.record(metadata))
+        emit(
+            self.run_id,
+            event_type,
+            source="agent",
+            **self.activity_filter.record(metadata),
+        )
 
     def read_stdout(self, stream):
         for line in stream:
@@ -376,6 +430,22 @@ class PiEvents:
         event_type = event.get("type")
         if event_type == "message_end":
             message = event.get("message", {})
+            if message.get("role") == "custom":
+                # Log the local reminder without exposing its text or changing task state.
+                details = message.get("details")
+                attempt = details.get("attempt") if isinstance(details, dict) else None
+                if (
+                    message.get("customType") == FINISH_REMINDER_TYPE
+                    and type(attempt) is int
+                    and attempt > 0
+                ):
+                    emit(
+                        self.run_id,
+                        "finish_reminder",
+                        source="supervisor",
+                        attempt=attempt,
+                    )
+                return
             if message.get("role") != "assistant":
                 return
             self.final_message = message
@@ -542,6 +612,8 @@ def run_pi(
         "--no-themes",
         "--extension",
         str(APPLICATION_DIR / "finish.mjs"),
+        "--extension",
+        str(APPLICATION_DIR / "publish.mjs"),
         "--no-context-files",
         "--no-approve",
         "--provider",
@@ -629,6 +701,8 @@ def supervise(microvm_id, payload):
     workspace = WORKSPACE_ROOT / run_id
     s3 = None
     events = None
+    publisher = None
+    publication = None
     result = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -637,6 +711,7 @@ def supervise(microvm_id, payload):
         "started_at": started_at,
         "exit_code": None,
         "agent_version": os.environ.get("PI_VERSION"),
+        "artifacts": [],
     }
     # Create AWS clients after restore. Data credentials cannot grant runtime actions.
     runtime = boto3.Session(region_name=payload["aws_region"])
@@ -648,7 +723,7 @@ def supervise(microvm_id, payload):
             aws_session_token=credentials["SessionToken"],
             region_name=payload["aws_region"],
         )
-        s3 = data_session.client("s3", config=AWS_CONFIG)
+        s3 = data_session.client("s3", config=S3_CONFIG)
         response = s3.get_object(Bucket=bucket, Key=f"{prefix}/spec.json")
         try:
             spec_bytes = response["Body"].read(MAX_SPEC_BYTES + 1)
@@ -685,6 +760,16 @@ def supervise(microvm_id, payload):
         if not key or key.startswith("{"):
             raise ValueError("secret_must_be_plain_api_key")
         work_deadline = deadline - CLEANUP_SECONDS
+        publisher = ArtifactPublisher(
+            s3,
+            bucket,
+            run_id,
+            workspace,
+            work_deadline,
+            payload["data_credentials_expires_at"],
+        )
+        publication = PublishService(publisher)
+        access_environment.update(publication.start())
         run_script("startup.sh", workspace, work_deadline, run_id)
         exit_code, timed_out, events = run_pi(
             spec,
@@ -709,6 +794,17 @@ def supervise(microvm_id, payload):
         # Exception text can include provider responses. Emit only its type.
         emit(run_id, "worker_error", error_type=type(error).__name__)
     finally:
+        # Finish active uploads before saving a manifest, even when Pi failed.
+        try:
+            if publication is not None:
+                publication.close()
+            elif publisher is not None:
+                publisher.close()
+        except Exception as error:
+            result.update(status="failed", reason="publication_shutdown_error")
+            emit(run_id, "publication_shutdown_error", error_type=type(error).__name__)
+        if publisher is not None:
+            result["artifacts"] = publisher.snapshot()
         if events is not None and events.report is not None:
             result["report"] = events.report
         if payload.get("github_token"):

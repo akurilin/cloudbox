@@ -58,7 +58,11 @@ INPUT_FIELDS = {
     "github_installation_id",
     "github_repository_ids",
 }
-GITHUB_INPUT_FIELDS = {"github_app_id", "github_installation_id", "github_repository_ids"}
+GITHUB_INPUT_FIELDS = {
+    "github_app_id",
+    "github_installation_id",
+    "github_repository_ids",
+}
 REQUIRED_FIELDS = {"aws_account_id", "aws_region", "aws_profile", "project_name"}
 MEMORY_SIZES = {512, 1024, 2048, 4096, 8192}
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
@@ -490,7 +494,7 @@ def main(argv=None):
                 environment,
                 outputs_only=True,
             )
-        # Stop at image selection; the cloud math test is a separate operator action.
+        # Stop at image selection; the cloud job test is a separate operator action.
         emit(
             {
                 "ok": True,

@@ -37,7 +37,7 @@ TEST_IDENTITY = {
 
 def access_spec():
     return {
-        "schema_version": 3,
+        "schema_version": supervisor.SCHEMA_VERSION,
         "prompt": "Read https://github.com/owner/project/issues/1",
         "model": "test-model",
         "timeout_seconds": 600,
@@ -192,6 +192,9 @@ class SupervisorAccessTests(unittest.TestCase):
                 "SecretAccessKey": "test",
                 "SessionToken": "test",
             },
+            "data_credentials_expires_at": (
+                datetime.now(UTC) + timedelta(hours=1)
+            ).isoformat(),
         }
         session = Mock()
         s3 = Mock()

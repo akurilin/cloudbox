@@ -16,7 +16,10 @@ dependencies = [
 cloudbox = "cloudbox.cli:main"
 
 [dependency-groups]
-dev = ["pre-commit==4.6.2"]
+dev = [
+    "pillow==12.3.0",
+    "pre-commit==4.6.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["cloudbox"]

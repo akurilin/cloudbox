@@ -39,6 +39,8 @@ SOURCE_NAMES = (
     "listener.py",
     "supervisor.py",
     "finish.mjs",
+    "publish.py",
+    "publish.mjs",
     "github_access.py",
     "requirements.txt",
     "startup.sh",

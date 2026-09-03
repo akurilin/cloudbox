@@ -227,7 +227,7 @@ def main(argv=None):
         report.save()
         print(
             f"Test account: {config['aws_account_id']} ({config['aws_region']})\n"
-            "Remove existing Cloudbox test resources; rebuild; run one math job; remove test resources and secrets.\n"
+            "Remove existing Cloudbox test resources; rebuild; run the file job test; remove test resources and secrets.\n"
             "AWS and OpenRouter charges apply. Do not use this test account during the test.",
             file=sys.stderr,
         )
@@ -242,9 +242,9 @@ def main(argv=None):
         report.event(stage, {"status": "passed"})
         stage, setup_started = "setup", True
         run_stage(report, stage, setup.main, setup_inputs)
-        stage = "math"
+        stage = "job"
         test_configuration(environment, config)
-        report.data["math"] = run_stage(
+        report.data["job"] = run_stage(
             report,
             stage,
             smoke_cloud.main,

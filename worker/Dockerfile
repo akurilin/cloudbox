@@ -56,7 +56,7 @@ RUN npm install --global --omit=optional "@earendil-works/pi-coding-agent@${PI_V
 WORKDIR /opt/cloudbox
 COPY requirements.txt .
 RUN python3.12 -m pip install --no-cache-dir --requirement requirements.txt
-COPY listener.py supervisor.py finish.mjs github_access.py github_api.py startup.sh teardown.sh ./
+COPY listener.py supervisor.py finish.mjs publish.py publish.mjs github_access.py github_api.py startup.sh teardown.sh ./
 
 ENV PYTHONUNBUFFERED=1 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_VERSION=${PI_VERSION}
 EXPOSE 8080

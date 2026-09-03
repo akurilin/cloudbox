@@ -1,13 +1,17 @@
 """Submit and inspect cloud runs; no local execution mode."""
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 import time
+import unicodedata
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 from .common import (
@@ -16,12 +20,14 @@ from .common import (
     GITHUB_SCHEMA_VERSION,
     MAX_PROMPT_CHARACTERS,
     MAX_RECORD_BYTES,
+    MAX_TIMEOUT_SECONDS,
     MICROVM_SERVICE,
     RUN_SCHEMA_VERSION,
     SCHEMA_VERSION,
     SDK_CONFIG,
     TASK_STATUSES,
     CloudboxError,
+    credential_session,
     emit,
     error_record,
     get_record,
@@ -41,6 +47,40 @@ LIST_PAGE_SIZE = 20
 MAX_LIST_PAGE_SIZE = 100
 LOG_POLL_SECONDS = 2
 LOG_SETTLE_POLLS = 3
+LOG_MAX_PAGES_PER_POLL = 3
+LOG_PAGE_SIZE = 100
+LOG_FINAL_SETTLE_SECONDS = 10
+WAIT_RESULT_GRACE_SECONDS = 30
+WAIT_STOP_GRACE_SECONDS = 60
+WAIT_MAX_READ_ERRORS = 3
+WAIT_SDK_CONFIG = Config(
+    retries={"mode": "standard", "total_max_attempts": 1},
+    connect_timeout=3,
+    read_timeout=5,
+)
+LINK_SDK_CONFIG = SDK_CONFIG.merge(
+    Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "virtual", "us_east_1_regional_endpoint": "regional"},
+    )
+)
+MAX_ARTIFACTS = 32
+MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+MAX_TOTAL_ARTIFACT_BYTES = 128 * 1024 * 1024
+MAX_ARTIFACT_NAME_CHARACTERS = 128
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
+ARTIFACT_LINK_SECONDS = 3600
+AGENT_EVENTS = {
+    "model_message",
+    "tool_execution_start",
+    "tool_execution_end",
+    "agent_start",
+    "agent_settled",
+    "agent_launch",
+    "auto_retry_start",
+    "auto_retry_end",
+}
+ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*?(?:\x07|\x1b\\))")
 IDLE_SUSPEND_SECONDS = 28_800
 MAX_HOOK_PAYLOAD_BYTES = 4096
 AWS_TERMINATED = "TERMINATED"
@@ -74,25 +114,34 @@ def build_parser():
     parser = Parser(prog="cloudbox")
     add_environment_argument(parser)
     commands = parser.add_subparsers(dest="command", required=True)
-    submit = commands.add_parser("submit", help="Start one cloud run.")
-    submit.add_argument("prompt", nargs="?")
-    submit.add_argument("--spec", type=Path)
-    submit.add_argument("--model")
-    submit.add_argument("--timeout")
+    for name, help_text in (
+        ("submit", "Start one cloud run."),
+        ("exec", "Start a cloud run, wait, and print its response."),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("prompt", nargs="?")
+        command.add_argument("--spec", type=Path)
+        command.add_argument("--model")
+        command.add_argument("--timeout")
     listing = commands.add_parser("list", help="List saved runs.")
     listing.add_argument("--status", choices=sorted(TASK_STATUSES))
     listing.add_argument("--limit", type=int, default=LIST_PAGE_SIZE)
     listing.add_argument("--cursor")
-    for name in ("status", "logs", "download", "cancel"):
+    for name in ("status", "logs", "download", "cancel", "wait", "links"):
         command = commands.add_parser(name)
         command.add_argument("run_id", type=run_id)
         if name == "logs":
             command.add_argument("--follow", action="store_true")
         if name == "download":
             command.add_argument("--output", "--directory", dest="directory", type=Path)
-    for command in commands.choices.values():
+    for name, command in commands.choices.items():
+        if name in {"exec", "wait"}:
+            command.add_argument("--debug-agent", action="store_true")
+            command.add_argument("--debug-supervisor", action="store_true")
         command.add_argument(
-            "--json", action="store_true", help="JSON output is always enabled."
+            "--json",
+            action="store_true",
+            help="Print JSON. Other commands use JSON by default.",
         )
     return parser
 
@@ -141,6 +190,146 @@ def input_spec(arguments):
     return values
 
 
+def terminal_text(value):
+    # Keep response layout but remove terminal commands from remote text.
+    value = ANSI_ESCAPE.sub("", value)
+    return "".join(
+        character
+        for character in value
+        if character in "\n\t" or unicodedata.category(character) not in {"Cc", "Cf"}
+    )
+
+
+def diagnostic(message):
+    print(terminal_text(message), file=sys.stderr, flush=True)
+
+
+def final_response(status):
+    result = status.get("result") or {}
+    report = result.get("report") or {}
+    if isinstance(report, dict):
+        for field in ("response", "summary"):
+            value = report.get(field)
+            if isinstance(value, str) and value.strip():
+                return value
+    return ""
+
+
+def artifact_manifest(identity, result):
+    artifacts = (result or {}).get("artifacts", [])
+    if not isinstance(artifacts, list) or len(artifacts) > MAX_ARTIFACTS:
+        raise CloudboxError("artifact_invalid", "The file list is invalid.")
+    total, keys = 0, set()
+    for item in artifacts:
+        if not isinstance(item, dict):
+            raise CloudboxError("artifact_invalid", "A file record is invalid.")
+        name, key = item.get("name"), item.get("key")
+        size, digest = item.get("bytes"), item.get("sha256")
+        if (
+            not isinstance(name, str)
+            or len(name) > MAX_ARTIFACT_NAME_CHARACTERS
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)
+            or not isinstance(key, str)
+            or type(size) is not int
+            or not 0 <= size <= MAX_ARTIFACT_BYTES
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise CloudboxError("artifact_invalid", "A file record is invalid.")
+        prefix = run_prefix(identity) + "artifacts/"
+        parts = key.removeprefix(prefix).split("/")
+        if (
+            not key.startswith(prefix)
+            or len(parts) != 2
+            or parts[1] != name
+            or key in keys
+        ):
+            raise CloudboxError("artifact_invalid", "A file key is outside this run.")
+        try:
+            run_id(parts[0])
+        except CloudboxError as error:
+            raise CloudboxError("artifact_invalid", "A file key is invalid.") from error
+        keys.add(key)
+        total += size
+    if total > MAX_TOTAL_ARTIFACT_BYTES:
+        raise CloudboxError("artifact_invalid", "The files exceed the download limit.")
+    return artifacts
+
+
+class RunLogStream:
+    def __init__(self, runs, identity, *, agent, supervisor):
+        self.client = runs.session.client("logs", config=WAIT_SDK_CONFIG)
+        self.group = runs.deployment["log_group_name"]
+        self.identity = identity
+        self.sources = {
+            source
+            for source, enabled in (("agent", agent), ("supervisor", supervisor))
+            if enabled
+        }
+        self.token = None
+        self.failed = False
+
+    def poll(self):
+        # Limit each log read so continuous output cannot delay status checks.
+        for _ in range(LOG_MAX_PAGES_PER_POLL):
+            request = {
+                "logGroupName": self.group,
+                "logStreamName": self.identity,
+                "startFromHead": True,
+                "limit": LOG_PAGE_SIZE,
+            }
+            if self.token:
+                request["nextToken"] = self.token
+            try:
+                response = self.client.get_log_events(**request)
+            except (BotoCoreError, ClientError) as error:
+                if (
+                    isinstance(error, ClientError)
+                    and error.response.get("Error", {}).get("Code")
+                    == "ResourceNotFoundException"
+                ):
+                    return True
+                if not self.failed:
+                    diagnostic("Logs unavailable; result checks continue.")
+                self.failed = True
+                return True
+            self.failed = False
+            for event in response.get("events", []):
+                try:
+                    record = json.loads(event.get("message", ""))
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                source = record.get("source")
+                if source not in {"agent", "supervisor"}:
+                    source = (
+                        "agent" if record.get("event") in AGENT_EVENTS else "supervisor"
+                    )
+                if source in self.sources:
+                    diagnostic(
+                        f"[{source}] "
+                        + json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                    )
+            next_token = response.get("nextForwardToken")
+            drained = next_token == self.token
+            self.token = next_token
+            if drained:
+                return True
+        return False
+
+    def settle(self):
+        # CloudWatch may deliver final events after the VM has stopped.
+        deadline = time.monotonic() + LOG_FINAL_SETTLE_SECONDS
+        settled = 0
+        while time.monotonic() < deadline:
+            settled = settled + 1 if self.poll() else 0
+            if self.failed or settled >= LOG_SETTLE_POLLS:
+                return
+            time.sleep(LOG_POLL_SECONDS)
+        diagnostic("Log wait ended; use logs --follow to check later events.")
+
+
 class Runs:
     def __init__(self, deployment, environment):
         self.deployment = deployment
@@ -148,12 +337,17 @@ class Runs:
         self.session = operator_session(deployment)
         self.s3 = self.session.client("s3", config=SDK_CONFIG)
         self.compute = self.session.client(MICROVM_SERVICE, config=SDK_CONFIG)
+        # Short read timeouts keep local waits bounded during service failures.
+        self.status_s3 = self.session.client("s3", config=WAIT_SDK_CONFIG)
+        self.status_compute = self.session.client(
+            MICROVM_SERVICE, config=WAIT_SDK_CONFIG
+        )
         self.bucket = deployment["bucket_name"]
 
-    def record(self, identity, name):
-        return get_record(self.s3, self.bucket, run_prefix(identity) + name)
+    def record(self, identity, name, *, client=None):
+        return get_record(client or self.s3, self.bucket, run_prefix(identity) + name)
 
-    def submit(self, supplied):
+    def submit(self, supplied, *, on_run_id=None):
         deployment = self.deployment
         spec = validate_spec(
             {
@@ -187,6 +381,8 @@ class Runs:
                 "The selected image version is not ready and active.",
             )
         identity = str(uuid.uuid4())
+        if on_run_id is not None:
+            on_run_id(identity)
         access = None
         preserve_token = False
         try:
@@ -199,6 +395,7 @@ class Runs:
                     key: credentials[key]
                     for key in ("AccessKeyId", "SecretAccessKey", "SessionToken")
                 },
+                "data_credentials_expires_at": credentials["Expiration"].isoformat(),
                 "openrouter_secret_arn": deployment["openrouter_secret_arn"],
                 "log_group_name": deployment["log_group_name"],
                 "aws_region": deployment["aws_region"],
@@ -331,15 +528,15 @@ class Runs:
         }
 
     def status(self, identity):
-        result = self.record(identity, "result.json")
-        launch = self.record(identity, "launch.json")
-        spec = self.record(identity, "spec.json")
+        s3 = getattr(self, "status_s3", self.s3)
+        compute = getattr(self, "status_compute", self.compute)
+        result = self.record(identity, "result.json", client=s3)
+        launch = self.record(identity, "launch.json", client=s3)
+        spec = self.record(identity, "spec.json", client=s3)
         state, compute_error = UNKNOWN, None
         if launch and launch.get("microvm_id"):
             try:
-                response = self.compute.get_microvm(
-                    microvmIdentifier=launch["microvm_id"]
-                )
+                response = compute.get_microvm(microvmIdentifier=launch["microvm_id"])
                 state = response.get("state", UNKNOWN)
             except (BotoCoreError, ClientError) as error:
                 compute_error = error_record(error)["error"]["code"]
@@ -354,8 +551,122 @@ class Runs:
             "compute_error": compute_error,
             "exists": bool(spec or result or launch),
             "submitted_at": spec.get("submitted_at") if spec else None,
+            "timeout_seconds": spec.get("timeout_seconds") if spec else None,
             "result": result,
             "launch": launch,
+        }
+
+    def wait(self, identity, *, debug_agent=False, debug_supervisor=False, launch=None):
+        stream = (
+            RunLogStream(self, identity, agent=debug_agent, supervisor=debug_supervisor)
+            if debug_agent or debug_supervisor
+            else None
+        )
+        started = time.monotonic()
+        deadline = started + MAX_TIMEOUT_SECONDS + WAIT_STOP_GRACE_SECONDS
+        deadline_loaded = False
+        result_seen, stopped_seen, missing_seen = None, None, None
+        read_errors = 0
+        current = {
+            "ok": False,
+            "run_id": identity,
+            "task_status": UNKNOWN,
+            "compute_state": UNKNOWN,
+            "result": None,
+        }
+        while True:
+            try:
+                current = self.status(identity)
+                # Use the launch response if its S3 record could not be saved.
+                if not current.get("launch") and launch and launch.get("microvm_id"):
+                    compute = getattr(self, "status_compute", self.compute)
+                    vm = compute.get_microvm(microvmIdentifier=launch["microvm_id"])
+                    current["compute_state"] = vm.get("state", UNKNOWN)
+                    current["compute_error"] = None
+                read_errors = 0
+            except (BotoCoreError, ClientError, CloudboxError) as error:
+                read_errors += 1
+                if read_errors >= WAIT_MAX_READ_ERRORS:
+                    return self.wait_failure(
+                        current,
+                        "status_unavailable",
+                        "Run status is unavailable. Use wait with this run ID later.",
+                        stream,
+                        cause=error_record(error)["error"]["code"],
+                    )
+            if stream:
+                stream.poll()
+            now = time.monotonic()
+            timeout = current.get("timeout_seconds")
+            if (
+                not deadline_loaded
+                and type(timeout) is int
+                and 0 < timeout <= MAX_TIMEOUT_SECONDS
+            ):
+                remaining = timeout
+                try:
+                    submitted = datetime.fromisoformat(current["submitted_at"])
+                    remaining -= (datetime.now(UTC) - submitted).total_seconds()
+                except (ValueError, TypeError, KeyError):
+                    pass
+                deadline = (
+                    now + max(0, min(timeout, remaining)) + WAIT_STOP_GRACE_SECONDS
+                )
+                deadline_loaded = True
+            result = current.get("result")
+            stopped = current["compute_state"] == AWS_TERMINATED
+            if result is not None and stopped:
+                if stream:
+                    stream.settle()
+                return {**current, "ok": current["task_status"] == "succeeded"}
+            if result is not None:
+                result_seen = now if result_seen is None else result_seen
+                if now - result_seen >= WAIT_STOP_GRACE_SECONDS:
+                    return self.wait_failure(
+                        current, "vm_not_stopped", "The job VM has not stopped.", stream
+                    )
+            if stopped and result is None:
+                stopped_seen = now if stopped_seen is None else stopped_seen
+                if now - stopped_seen >= WAIT_RESULT_GRACE_SECONDS:
+                    return self.wait_failure(
+                        current,
+                        "missing_result",
+                        "The job VM stopped without a saved result.",
+                        stream,
+                    )
+            if (
+                result is None
+                and not current.get("launch")
+                and not launch
+                and not read_errors
+            ):
+                missing_seen = now if missing_seen is None else missing_seen
+                if now - missing_seen >= WAIT_RESULT_GRACE_SECONDS:
+                    return self.wait_failure(
+                        current,
+                        "launch_unknown",
+                        "No saved launch is available. Inspect this run before resubmitting.",
+                        stream,
+                    )
+            else:
+                missing_seen = None
+            if now >= deadline:
+                return self.wait_failure(
+                    current,
+                    "wait_deadline",
+                    "The run deadline passed without a confirmed result and VM stop.",
+                    stream,
+                )
+            time.sleep(LOG_POLL_SECONDS)
+
+    @staticmethod
+    def wait_failure(current, code, message, stream, **details):
+        if stream:
+            stream.settle()
+        return {
+            **current,
+            "ok": False,
+            "wait_error": {"code": code, "message": message, **details},
         }
 
     def list(self, arguments):
@@ -436,6 +747,7 @@ class Runs:
 
     def download(self, identity, directory):
         status = self.status(identity)
+        artifacts = artifact_manifest(identity, status.get("result"))
         target = (
             (directory or Path.cwd() / "downloads" / self.environment.name / identity)
             .expanduser()
@@ -465,6 +777,27 @@ class Runs:
                     )
                 destination.write(contents)
             files.append({"key": key, "path": str(path), "bytes": len(contents)})
+        for artifact in artifacts:
+            key = artifact["key"]
+            path = target / key.removeprefix(run_prefix(identity))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            response = self.s3.get_object(Bucket=self.bucket, Key=key)
+            size, digest = 0, hashlib.sha256()
+            with response["Body"] as body, path.open("xb") as destination:
+                while chunk := body.read(DOWNLOAD_CHUNK_BYTES):
+                    size += len(chunk)
+                    if size > artifact["bytes"]:
+                        raise CloudboxError(
+                            "artifact_size_mismatch", "A file exceeds its saved size."
+                        )
+                    digest.update(chunk)
+                    destination.write(chunk)
+            if size != artifact["bytes"] or digest.hexdigest() != artifact["sha256"]:
+                raise CloudboxError(
+                    "artifact_integrity_error",
+                    "A file does not match its saved record.",
+                )
+            files.append({"key": key, "path": str(path), "bytes": size})
         return {
             "ok": True,
             "run_id": identity,
@@ -472,6 +805,46 @@ class Runs:
             "incomplete": status["task_status"] != "succeeded",
             "directory": str(target),
             "files": files,
+        }
+
+    def links(self, identity):
+        # Get new credentials so old CLI sessions cannot produce expired links.
+        session = operator_session(self.deployment)
+        s3 = session.client("s3", config=SDK_CONFIG)
+        result = get_record(s3, self.bucket, run_prefix(identity) + "result.json")
+        if result is None:
+            raise CloudboxError("missing_result", "No saved result is available.")
+        artifacts = artifact_manifest(identity, result)
+        if not artifacts:
+            return {"ok": True, "run_id": identity, "artifacts": []}
+        credentials = scoped_data_credentials(session, self.deployment, identity)
+        signer = credential_session(credentials, self.deployment["aws_region"]).client(
+            "s3", config=LINK_SDK_CONFIG
+        )
+        now = datetime.now(UTC)
+        lifetime = min(
+            ARTIFACT_LINK_SECONDS,
+            int((credentials["Expiration"] - now).total_seconds())
+            - CREDENTIAL_MARGIN_SECONDS,
+        )
+        if lifetime <= 0:
+            raise CloudboxError("credentials_expired", "The new credentials expired.")
+        expires_at = (now + timedelta(seconds=lifetime)).isoformat()
+        return {
+            "ok": True,
+            "run_id": identity,
+            "artifacts": [
+                {
+                    **artifact,
+                    "url": signer.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": self.bucket, "Key": artifact["key"]},
+                        ExpiresIn=lifetime,
+                    ),
+                    "expires_at": expires_at,
+                }
+                for artifact in artifacts
+            ],
         }
 
     def logs(self, identity, follow):
@@ -522,13 +895,53 @@ class Runs:
 
 
 def main(argv=None):
+    arguments, identity = None, None
+
+    def announce_run(value):
+        nonlocal identity
+        if identity != value:
+            identity = value
+            diagnostic(f"Run ID: {value}")
+
     try:
         arguments = build_parser().parse_args(argv)
-        supplied = input_spec(arguments) if arguments.command == "submit" else None
+        blocking = arguments.command in {"exec", "wait"}
+        supplied = (
+            input_spec(arguments) if arguments.command in {"submit", "exec"} else None
+        )
+        if arguments.command == "wait":
+            announce_run(arguments.run_id)
         environment = get_environment(arguments.env)
         runs = Runs(load_deployment(environment), environment)
         if arguments.command == "submit":
             result = runs.submit(supplied)
+        elif blocking:
+            launch = None
+            if arguments.command == "exec":
+                launch = runs.submit(supplied, on_run_id=announce_run)
+                announce_run(launch["run_id"])
+            result = runs.wait(
+                identity,
+                debug_agent=arguments.debug_agent,
+                debug_supervisor=arguments.debug_supervisor,
+                launch=launch,
+            )
+            result = {"environment": environment.name, **result}
+            if arguments.json:
+                emit(result)
+            else:
+                response = final_response(result)
+                if response:
+                    print(terminal_text(response), flush=True)
+                elif result["ok"]:
+                    diagnostic("The saved result has no response text.")
+                    return 1
+            if result.get("wait_error"):
+                diagnostic(result["wait_error"]["message"])
+            elif not result["ok"]:
+                reason = (result.get("result") or {}).get("reason", "no result")
+                diagnostic(f"Run {result['task_status']}: {reason}")
+            return 0 if result["ok"] else 1
         elif arguments.command == "list":
             result = runs.list(arguments)
         elif arguments.command == "status":
@@ -537,6 +950,8 @@ def main(argv=None):
             result = runs.cancel(arguments.run_id)
         elif arguments.command == "download":
             result = runs.download(arguments.run_id, arguments.directory)
+        elif arguments.command == "links":
+            result = runs.links(arguments.run_id)
         else:
             runs.logs(arguments.run_id, arguments.follow)
             return 0
@@ -550,10 +965,31 @@ def main(argv=None):
         ValueError,
         KeyError,
     ) as error:
-        emit(error_record(error))
+        record = error_record(error)
+        if arguments and arguments.command in {"exec", "wait"}:
+            if record.get("run_id"):
+                announce_run(record["run_id"])
+            if identity:
+                record["run_id"] = identity
+            if arguments.json:
+                emit(record)
+            else:
+                diagnostic(record["error"].get("message", record["error"]["code"]))
+        else:
+            emit(record)
         return 1
     except KeyboardInterrupt:
-        emit({"ok": False, "error": {"code": "interrupted"}})
+        record = {"ok": False, "error": {"code": "interrupted"}}
+        if identity:
+            record["run_id"] = identity
+        if arguments and arguments.command in {"exec", "wait"}:
+            diagnostic("Local command stopped. Check the run status.")
+            if identity:
+                diagnostic(f"Run ID: {identity}")
+            if arguments.json:
+                emit(record)
+        else:
+            emit(record)
         return 130
 
 

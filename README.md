@@ -154,13 +154,39 @@ uv run pre-commit install
 
 ```sh
 uv run python -m unittest discover -s tests
-node --test tests/test_finish.mjs
+node --test tests/test_finish.mjs tests/test_publish.mjs
 ```
 
 These tests cover result handling, credentials, and cleanup. Cloud calls are
 simulated. Use the cloud smoke check to verify the deployed agent loop.
 
-## Full cloud test
+## Job test: existing deployment
+
+```sh
+uv run python scripts/smoke_cloud.py --env test
+```
+
+Run this test for CLI and worker changes. It uses the selected worker image and
+existing infrastructure. Missing configuration or access fails the test.
+The job deadline is 20 minutes; override it with `--timeout`.
+
+```text
+exec -> agent creates and publishes files -> response + live logs
+     -> job VM stops -> download printed links -> check file contents
+```
+
+The agent creates a CSV of integers 1–10 and their squares, a 32×32 blue PNG,
+and a ZIP containing both. The test checks the sum (385), a unique test ID,
+the saved response, separate live agent/supervisor logs, and all three URLs.
+It downloads after VM termination, checks CSV values and PNG pixels, and
+compares the archived files with the separate downloads.
+
+Evidence stays under `.cloudbox/smoke/test/<test-id>/`: `response.txt`,
+`debug.log`, the result, downloaded files, and `verification.json`.
+On failure, the test stops only its job VM. Shared infrastructure and stored
+results remain. Image updates are a separate deployment step.
+
+## Full infrastructure lifecycle test
 
 ```sh
 uv run python scripts/e2e_cloud.py
@@ -169,19 +195,18 @@ uv run python scripts/e2e_cloud.py
 The test runs without approval prompts. The test deployment is disposable:
 
 ```text
-reset test -> check clean -> setup -> math job -> validate -> teardown -> check clean
+reset test -> check clean -> setup -> job test -> teardown -> check clean
 ```
 
 If GitHub is configured, also pass `--github-key-file /absolute/path/to/key.pem`.
-The test checks this file before reset and reloads it during setup. It still
-runs the math prompt; it does not create GitHub content.
+The test checks this file before reset and reloads it during setup. The job
+creates files in S3; it does not create GitHub content.
 
 The test clears an existing Cloudbox test deployment before setup. It refuses
 unknown deletion targets, invalid production inputs, and a production account
 that matches the test account. Production inputs can be absent only when
-production state is empty. It checks
-`(12345 * 6789) + 98765 == 83908970`, the downloaded JSON,
-run status, logs, listing, and VM termination. It tries teardown even if setup or
+production state is empty. It runs the
+same job test described above. It tries teardown even if setup or
 the job fails. Cleanup failure fails the test. AWS and OpenRouter charges apply.
 
 Reset and cleanup permanently delete the test secrets, results, logs, and image.
@@ -189,16 +214,17 @@ Local reports and downloaded results stay under `.cloudbox/`. Do not run other s
 teardown, or job commands against `test` during this test. If cleanup fails or the
 process is killed, run teardown again with the same configuration and state.
 
-To test an existing deployment without deleting it:
-
-```sh
-uv run python scripts/smoke_cloud.py --env test
-```
+## Agent completion and files
 
 The agent calls `finish` with `status` (`completed` or `blocked`), a short
-`summary`, and an optional JSON object `result`. The tool validates the report and ends
-the agent run. Invalid calls return an error for correction. Call `finish` alone
-after other tools finish. No output file or exact final reply is required.
+`summary`, either `response` text or a `response_file` path, and optional JSON
+object `result`. The tool reads a response file under `output/` into `response`
+without edits. It validates the report and ends the agent run. Invalid calls
+return an error for correction. Call `finish` alone after other tools finish. The response
+must contain text; files are optional.
+
+If the agent returns text without `finish`, the harness sends one completion
+reminder. A missing report after that reminder still fails the run.
 
 The supervisor saves these fields under `report` in the run's `result.json`,
 with runtime status, timing, and usage. Crashes and timeouts remain failures even
@@ -207,7 +233,19 @@ still revokes credentials and stops the VM. Reports are limited to 1 MiB of JSON
 and 128 nesting levels. Top-level fields are fixed; `result` has arbitrary fields
 whose values can contain any JSON data.
 
-New runs use internal schema 3. Update the worker image before submitting them.
+The agent publishes selected files with `publish_file(path)` before completion.
+Files must be regular files under the workspace's `output/` directory. The tool
+checks paths and limits, uploads to this run's private S3 prefix, and returns a
+download URL and a local JSON receipt. The agent can use the receipt to copy
+exact URLs into its response file. Upload errors remain correctable tool errors.
+The supervisor saves the response and published file metadata; it does not
+select files or rewrite the response.
+
+Signed links expire with their signing credentials, at most one hour. Use
+`links RUN_ID` for fresh URLs or `download RUN_ID` for authenticated downloads.
+Stored object keys remain available until normal retention removes the files.
+
+New runs use internal schema 5. Update the worker image before submitting them.
 User input specifications remain schema 1. Historical result files still download.
 
 ## Check or delete resources
@@ -238,8 +276,26 @@ are not deleted. This is not an account-wide erase command.
 
 ## Jobs
 
-Commands return JSON. Check `task_status` and `compute_state`; a successful CLI
-command does not mean that the remote task succeeded.
+`exec` submits, waits for the saved result and VM termination, then prints the
+agent's final response. It returns nonzero for failed, blocked, timed-out,
+cancelled, or unknown outcomes. `wait` does the same for an existing run.
+
+```sh
+uv run cloudbox --env test exec 'Calculate 12 * 13.'
+uv run cloudbox --env test exec 'Create and publish a CSV of square numbers.' --debug-agent --debug-supervisor
+printf 'Explain this topic.\n' | uv run cloudbox --env test exec -
+uv run cloudbox --env test wait RUN_ID
+```
+
+The final response goes to stdout. The run ID, errors, and optional debug events
+go to stderr. `--json` returns the full result instead of response text. Debug
+flags are independent and can be combined. They show message and tool events;
+token deltas and incremental shell output are not included. Ctrl-C stops local
+waiting and leaves the cloud job running. Use `wait RUN_ID` to reconnect or
+`cancel RUN_ID` to stop it. A lost launch response must not trigger resubmission.
+
+The commands below return JSON. `submit` returns at launch. Their exit codes
+describe the CLI operation; inspect `task_status` and `compute_state` for the job.
 
 ```sh
 uv run cloudbox --env prod submit 'Calculate 12 * 13. Set finish.result to a JSON object with an integer answer field.'
@@ -247,10 +303,11 @@ uv run cloudbox --env prod list
 uv run cloudbox --env prod status RUN_ID
 uv run cloudbox --env prod logs RUN_ID --follow
 uv run cloudbox --env prod download RUN_ID
+uv run cloudbox --env prod links RUN_ID
 uv run cloudbox --env prod cancel RUN_ID
 ```
 
-Submission accepts stdin (`submit -`) or `--spec job.json`, with `--model` and
+Both `submit` and `exec` accept stdin (`-`) or `--spec job.json`, with `--model` and
 `--timeout` overrides. A job accepts `schema_version`, `prompt`, `model`, and
 `timeout_seconds`. Only the prompt is required. No automatic model substitution.
 Downloads refuse to overwrite files. Saved partial output remains available.
@@ -280,25 +337,16 @@ the trace, or `cloudbox logs RUN_ID --follow` while the agent runs.
 - Prompt limit: 128,000 characters. Finish report limit: 1 MiB.
 - Run data and logs expire after 30 days; deletion is not immediate at that age.
 - Cancellation can leave an `unknown` outcome. Recovery is not yet tested.
-- No uploads, resume, local worker simulation, or per-run environment changes.
-- Downloads contain run records. General file artifact collection is not implemented;
-  return needed data in the finish report or use the granted external tools.
-
-The prior cloud math test passed on 2026-09-02 against the original
-single-account deployment. A later GitHub-tools run on the same deployment
-also passed: authenticated checkout, a real draft PR, and an issue comment;
-CloudWatch captured commands and results, teardown removed the test resources,
-and the final check was clean. The finish-tool check then restored that
-environment and passed on worker image `3.0`. All 111 local tests pass. The
-test environment remains deployed; completed job VMs stopped; prod was not
-changed. The new multi-account lifecycle test has not yet been run against AWS.
+- No input attachments, agent resume, local worker simulation, or per-run
+  environment changes.
+- Published files: at most 32 files, 32 MiB per file, and 128 MiB total per run.
+  Uploads must finish before the agent deadline.
 
 ## Future work
 
 Goal: unattended tasks with durable results. Ideas for later:
 
-- Blocking `exec`/`wait`, final-answer output, and log filters.
-- Input attachments, output files, and fresh download links.
+- Input attachments and finer progress streaming.
 - Longer runs with credential renewal.
 - Recovery for unknown results and cancellation.
 - Task validation commands, shared-resource locks, resume, and stronger security

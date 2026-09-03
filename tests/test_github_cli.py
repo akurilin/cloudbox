@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from botocore.exceptions import ClientError, ReadTimeoutError
 
 from cloudbox.cli import MAX_HOOK_PAYLOAD_BYTES, Runs
-from cloudbox.common import CloudboxError
+from cloudbox.common import RUN_SCHEMA_VERSION, CloudboxError
 from cloudbox.github import RUN_PERMISSIONS, GitHubAccess
 
 TOKEN = "test-token-do-not-save"
@@ -90,6 +90,11 @@ class GitHubCLITests(unittest.TestCase):
         ]
         self.assertEqual(payload["github_token"], TOKEN)
         self.assertEqual(payload["github_token_expires_at"], self.access.expires_at)
+        self.assertEqual(payload["schema_version"], RUN_SCHEMA_VERSION)
+        self.assertEqual(
+            payload["data_credentials_expires_at"],
+            self.credentials["Expiration"].isoformat(),
+        )
         self.assertNotIn(TOKEN, json.dumps(records))
         self.revoke.assert_not_called()
 
