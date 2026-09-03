@@ -1,13 +1,13 @@
 """Check local environment selection and lifecycle account guards."""
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from cloudbox import cli, environments
@@ -27,24 +27,48 @@ class EnvironmentConfigTests(unittest.TestCase):
         self.enterContext(patch.object(environments, "ROOT", self.root))
         self.enterContext(patch.object(e2e_cloud, "ROOT", self.root))
         # Stop unexpected AWS access, Terraform commands, or lifecycle stages.
-        self.aws = self.enterContext(patch("cloudbox.common.boto3.Session", side_effect=AssertionError("Unexpected AWS access")))
-        self.process = self.enterContext(patch("subprocess.run", side_effect=AssertionError("Unexpected command")))
-        self.stages = self.enterContext(patch.object(e2e_cloud, "run_stage", side_effect=AssertionError("Unexpected cloud stage")))
+        self.aws = self.enterContext(
+            patch(
+                "cloudbox.common.boto3.Session",
+                side_effect=AssertionError("Unexpected AWS access"),
+            )
+        )
+        self.process = self.enterContext(
+            patch("subprocess.run", side_effect=AssertionError("Unexpected command"))
+        )
+        self.stages = self.enterContext(
+            patch.object(
+                e2e_cloud,
+                "run_stage",
+                side_effect=AssertionError("Unexpected cloud stage"),
+            )
+        )
 
     def tearDown(self):
         self.aws.assert_not_called()
         self.stages.assert_not_called()
 
     def write_config(self, name, account=TEST_ACCOUNT):
-        config = {"aws_account_id": account, "aws_region": "us-east-1",
-                  "aws_profile": "local-profile", "project_name": "cloudbox"}
+        config = {
+            "aws_account_id": account,
+            "aws_region": "us-east-1",
+            "aws_profile": "local-profile",
+            "project_name": "cloudbox",
+        }
         path = self.root / "infra" / "environments" / f"{name}.tfvars.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"deployment": config}), encoding="utf-8")
         return path
 
     def write_prod_state(self, stage, state):
-        path = self.root / ".cloudbox" / "environments" / "prod" / stage / "terraform.tfstate"
+        path = (
+            self.root
+            / ".cloudbox"
+            / "environments"
+            / "prod"
+            / stage
+            / "terraform.tfstate"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state), encoding="utf-8")
         return path
@@ -53,10 +77,20 @@ class EnvironmentConfigTests(unittest.TestCase):
         for name in ("test", "prod"):
             with self.subTest(name=name):
                 environment = environments.get_environment(name)
-                self.assertEqual(environment.input_path, self.root / "infra" / "environments" / f"{name}.tfvars.json")
+                self.assertEqual(
+                    environment.input_path,
+                    self.root / "infra" / "environments" / f"{name}.tfvars.json",
+                )
                 self.assertEqual(environment.key_path, self.root / f".env.{name}")
-                self.assertEqual(environment.state_path(environment.main_root),
-                                 self.root / ".cloudbox" / "environments" / name / "main" / "terraform.tfstate")
+                self.assertEqual(
+                    environment.state_path(environment.main_root),
+                    self.root
+                    / ".cloudbox"
+                    / "environments"
+                    / name
+                    / "main"
+                    / "terraform.tfstate",
+                )
 
     def test_selection_rejects_other_names_even_with_input_files(self):
         for name in ("legacy", "example", "sandbox"):
@@ -72,18 +106,32 @@ class EnvironmentConfigTests(unittest.TestCase):
         for name in ("test", "prod"):
             self.assertEqual(parser.parse_args(["--env", name]).env, name)
         for name in ("legacy", "example", "sandbox"):
-            with self.subTest(name=name), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            with (
+                self.subTest(name=name),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
                 parser.parse_args(["--env", name])
 
     def test_lifecycle_accepts_missing_prod_without_state(self):
         self.write_config("test")
-        self.assertEqual(e2e_cloud.test_configuration(environments.get_environment("test"))["aws_account_id"], TEST_ACCOUNT)
+        self.assertEqual(
+            e2e_cloud.test_configuration(environments.get_environment("test"))[
+                "aws_account_id"
+            ],
+            TEST_ACCOUNT,
+        )
 
     def test_lifecycle_accepts_missing_prod_with_empty_state(self):
         self.write_config("test")
         for stage in ("bootstrap", "main"):
             self.write_prod_state(stage, {"resources": [], "outputs": {}})
-        self.assertEqual(e2e_cloud.test_configuration(environments.get_environment("test"))["aws_account_id"], TEST_ACCOUNT)
+        self.assertEqual(
+            e2e_cloud.test_configuration(environments.get_environment("test"))[
+                "aws_account_id"
+            ],
+            TEST_ACCOUNT,
+        )
 
     def test_lifecycle_rejects_missing_prod_with_saved_resources_or_outputs(self):
         self.write_config("test")
@@ -92,7 +140,9 @@ class EnvironmentConfigTests(unittest.TestCase):
                 with self.subTest(stage=stage, state=state):
                     path = self.write_prod_state(stage, state)
                     with self.assertRaises(CloudboxError) as failure:
-                        e2e_cloud.test_configuration(environments.get_environment("test"))
+                        e2e_cloud.test_configuration(
+                            environments.get_environment("test")
+                        )
                     self.assertEqual(failure.exception.code, "prod_config_missing")
                     path.unlink()
 
@@ -127,7 +177,12 @@ class EnvironmentConfigTests(unittest.TestCase):
     def test_lifecycle_accepts_different_accounts(self):
         self.write_config("test")
         self.write_config("prod", PROD_ACCOUNT)
-        self.assertEqual(e2e_cloud.test_configuration(environments.get_environment("test"))["aws_account_id"], TEST_ACCOUNT)
+        self.assertEqual(
+            e2e_cloud.test_configuration(environments.get_environment("test"))[
+                "aws_account_id"
+            ],
+            TEST_ACCOUNT,
+        )
 
     def test_missing_test_input_returns_json_from_lifecycle(self):
         output = io.StringIO()
@@ -146,7 +201,9 @@ class EnvironmentConfigTests(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 code = cli.main(command[3:])
-            return subprocess.CompletedProcess(command, code, stdout=output.getvalue(), stderr="")
+            return subprocess.CompletedProcess(
+                command, code, stdout=output.getvalue(), stderr=""
+            )
 
         output = io.StringIO()
         self.process.side_effect = local_cli
@@ -164,8 +221,13 @@ class LocalInputIgnoreTests(unittest.TestCase):
         paths = ("infra/cloudbox.auto.tfvars.json", ".env.test", ".env.prod")
         for path in paths:
             with self.subTest(path=path):
-                result = subprocess.run(["git", "check-ignore", "--no-index", path],
-                                        cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+                result = subprocess.run(
+                    ["git", "check-ignore", "--no-index", path],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
 

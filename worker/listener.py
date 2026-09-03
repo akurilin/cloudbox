@@ -50,7 +50,12 @@ class HookHandler(BaseHTTPRequestHandler):
             run_id = payload["run_id"]
             if str(uuid.UUID(run_id)) != run_id:
                 raise ValueError("Invalid run ID")
-            for field in ("bucket_name", "openrouter_secret_arn", "log_group_name", "aws_region"):
+            for field in (
+                "bucket_name",
+                "openrouter_secret_arn",
+                "log_group_name",
+                "aws_region",
+            ):
                 if not isinstance(payload[field], str) or not payload[field]:
                     raise ValueError("Missing runtime setting")
             for field in ("AccessKeyId", "SecretAccessKey", "SessionToken"):
@@ -68,7 +73,9 @@ class HookHandler(BaseHTTPRequestHandler):
                 return
             if active_run is None:
                 active_run = identity
-                threading.Thread(target=supervise, args=(microvm_id, payload), daemon=True).start()
+                threading.Thread(
+                    target=supervise, args=(microvm_id, payload), daemon=True
+                ).start()
         self.respond(HTTPStatus.OK)
 
 

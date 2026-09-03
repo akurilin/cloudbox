@@ -14,6 +14,10 @@ generic descriptions.
 Local validation: all 13 environment regression tests passed after first
 reproducing the defects. No AWS calls or cloud lifecycle test ran.
 
+Manual pre-commit checks use the current main configuration. Hook fixes add
+formatting, project Ruff settings, the policy module's Terraform version range,
+and Bash pipefail for image checksum commands.
+
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
 and attachment, and three worker boundaries. The separately approved main apply
@@ -346,52 +350,52 @@ Example tasks:
 
 ## Decisions and preferences
 
-| Item | Current position |
-| --- | --- |
-| CLI and supervisor | Python |
-| Terraform state | Local; exclude from Git and worker access |
-| Agent harness | Pi is the user's preferred default, not a fixed dependency |
-| Model provider | OpenRouter |
-| Sandbox model | GLM 5.3 (`z-ai/glm-5.3`); allow explicit per-run overrides |
-| Deployment | The user's original account, region `us-east-1`; configurable, not hard-coded in implementation |
-| Compute | Lambda MicroVMs |
-| Bootstrap profile | The user's temporary SSO administrator profile; approved bootstrap only |
-| First task | Write a poem to a new, non-empty `result.txt`; download it after completion |
-| Initial use | One user, concurrent independent runs; no sensitive data needed for the poem test |
-| User interface | Agent-friendly local CLI with JSON output, listing, filtering, logs, status, download, submit, and cancel |
-| Run identity | New unique ID for each intentional submission; reuse identity only for retries of that launch |
-| Task/session identity | No separate task/session IDs or task versions in v1; save the task specification with each run |
-| S3 isolation | Worker can access only the files authorized for its own run |
-| Outcome bookkeeping | Agent returns completed/blocked JSON; supervisor owns validation, records, metadata logs, and cleanup |
-| Shutdown permission | Direct termination of the current VM; image-scoped permission and cross-run risk accepted for v1 |
-| Named locks | Deferred until shared-resource tasks |
-| Unknown outcome | Report missing evidence as unknown; do not block unrelated submissions |
-| Provider routing | OpenRouter selects providers for the chosen model; no automatic model substitution |
-| Submission | Prompt or stdin plus flags, or a JSON job file; one validated run schema |
-| Input uploads | Not supported in v1; no file, directory, or repository uploads |
-| Deliverables | `output/result.txt` in v1; no separate code-diff collection |
-| Code changes | Not required for success; questions and exploratory tasks are valid |
-| Invalid input | Fail before submission; do not start work with invalid settings |
-| AWS configuration | Read named Terraform outputs in memory; require initialized local state; no deployment cache |
-| Deployment inputs | Terraform-owned `infra/cloudbox.auto.tfvars.json`; no separate CLI input copy |
-| Image updates | Explicitly select the version; building a new image does not change later runs |
-| Environment | One standard configuration for all runs; no environment selector |
-| Environment variables | Shared defaults and supervisor-set runtime values; no user overrides in v1 |
-| Resources | One small CPU, memory, and disk allocation for all runs; no per-run overrides; exact sizes remain open |
-| Lifecycle scripts | Shared startup and teardown scripts run by the supervisor; default no-op; per-run scripts deferred |
-| Run deadline | Ten minutes by default; configurable per run |
-| Cleanup allowance | Final thirty seconds within the run deadline; no guaranteed final upload |
-| Agent control | Simple supervisor and Pi in one VM; internal isolation and log-tamper protection deferred |
-| Text limits | Prompt: 128,000 characters; result file: 1 MiB; no tokenizer integration |
-| Blocked task | Fail with a reason, then terminate; no waiting for user input |
-| Retention | Thirty days for run data and logs; no S3 version history |
-| Partial output | Download if saved; mark incomplete and retain failure status; expire normally |
-| Logging | Stream Pi and supervisor metadata to CloudWatch during execution; no full transcripts in v1 |
-| Runtime Internet access | Open outbound access in v1; restrictions deferred |
-| Customer VPC | None in v1; managed networking with `NO_INGRESS` |
-| Threat model | Treat the agent and its tool code as potentially hostile |
-| Credential risk | User accepts runtime credential exposure; still restrict permissions |
-| Spending controls | User configures the OpenRouter key limit and AWS billing alert |
+| Item                    | Current position                                                                                          |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| CLI and supervisor      | Python                                                                                                    |
+| Terraform state         | Local; exclude from Git and worker access                                                                 |
+| Agent harness           | Pi is the user's preferred default, not a fixed dependency                                                |
+| Model provider          | OpenRouter                                                                                                |
+| Sandbox model           | GLM 5.3 (`z-ai/glm-5.3`); allow explicit per-run overrides                                                |
+| Deployment              | The user's original account, region `us-east-1`; configurable, not hard-coded in implementation           |
+| Compute                 | Lambda MicroVMs                                                                                           |
+| Bootstrap profile       | The user's temporary SSO administrator profile; approved bootstrap only                                   |
+| First task              | Write a poem to a new, non-empty `result.txt`; download it after completion                               |
+| Initial use             | One user, concurrent independent runs; no sensitive data needed for the poem test                         |
+| User interface          | Agent-friendly local CLI with JSON output, listing, filtering, logs, status, download, submit, and cancel |
+| Run identity            | New unique ID for each intentional submission; reuse identity only for retries of that launch             |
+| Task/session identity   | No separate task/session IDs or task versions in v1; save the task specification with each run            |
+| S3 isolation            | Worker can access only the files authorized for its own run                                               |
+| Outcome bookkeeping     | Agent returns completed/blocked JSON; supervisor owns validation, records, metadata logs, and cleanup     |
+| Shutdown permission     | Direct termination of the current VM; image-scoped permission and cross-run risk accepted for v1          |
+| Named locks             | Deferred until shared-resource tasks                                                                      |
+| Unknown outcome         | Report missing evidence as unknown; do not block unrelated submissions                                    |
+| Provider routing        | OpenRouter selects providers for the chosen model; no automatic model substitution                        |
+| Submission              | Prompt or stdin plus flags, or a JSON job file; one validated run schema                                  |
+| Input uploads           | Not supported in v1; no file, directory, or repository uploads                                            |
+| Deliverables            | `output/result.txt` in v1; no separate code-diff collection                                               |
+| Code changes            | Not required for success; questions and exploratory tasks are valid                                       |
+| Invalid input           | Fail before submission; do not start work with invalid settings                                           |
+| AWS configuration       | Read named Terraform outputs in memory; require initialized local state; no deployment cache              |
+| Deployment inputs       | Terraform-owned `infra/cloudbox.auto.tfvars.json`; no separate CLI input copy                             |
+| Image updates           | Explicitly select the version; building a new image does not change later runs                            |
+| Environment             | One standard configuration for all runs; no environment selector                                          |
+| Environment variables   | Shared defaults and supervisor-set runtime values; no user overrides in v1                                |
+| Resources               | One small CPU, memory, and disk allocation for all runs; no per-run overrides; exact sizes remain open    |
+| Lifecycle scripts       | Shared startup and teardown scripts run by the supervisor; default no-op; per-run scripts deferred        |
+| Run deadline            | Ten minutes by default; configurable per run                                                              |
+| Cleanup allowance       | Final thirty seconds within the run deadline; no guaranteed final upload                                  |
+| Agent control           | Simple supervisor and Pi in one VM; internal isolation and log-tamper protection deferred                 |
+| Text limits             | Prompt: 128,000 characters; result file: 1 MiB; no tokenizer integration                                  |
+| Blocked task            | Fail with a reason, then terminate; no waiting for user input                                             |
+| Retention               | Thirty days for run data and logs; no S3 version history                                                  |
+| Partial output          | Download if saved; mark incomplete and retain failure status; expire normally                             |
+| Logging                 | Stream Pi and supervisor metadata to CloudWatch during execution; no full transcripts in v1               |
+| Runtime Internet access | Open outbound access in v1; restrictions deferred                                                         |
+| Customer VPC            | None in v1; managed networking with `NO_INGRESS`                                                          |
+| Threat model            | Treat the agent and its tool code as potentially hostile                                                  |
+| Credential risk         | User accepts runtime credential exposure; still restrict permissions                                      |
+| Spending controls       | User configures the OpenRouter key limit and AWS billing alert                                            |
 
 Keep the provisioner role, secrets handling, and per-run S3 checks. The external
 review's broad IAM simplifications were not adopted. Q20 separately defers
@@ -438,13 +442,13 @@ Neither is part of the first version.
 
 ## AWS resources
 
-| Resource | Purpose |
-| --- | --- |
-| One MicroVM image | Pinned hook listener, supervisor, Pi, and dependencies |
-| One private S3 bucket | Image archive, run specifications, outputs, and result files |
-| IAM roles and policies | Separate deployment, build, and runtime access |
-| CloudWatch log groups | Build and runtime logs with thirty-day retention |
-| One Secrets Manager secret | OpenRouter API key, fetched at runtime |
+| Resource                   | Purpose                                                      |
+| -------------------------- | ------------------------------------------------------------ |
+| One MicroVM image          | Pinned hook listener, supervisor, Pi, and dependencies       |
+| One private S3 bucket      | Image archive, run specifications, outputs, and result files |
+| IAM roles and policies     | Separate deployment, build, and runtime access               |
+| CloudWatch log groups      | Build and runtime logs with thirty-day retention             |
+| One Secrets Manager secret | OpenRouter API key, fetched at runtime                       |
 
 Do not add DynamoDB, SQS, Step Functions, API Gateway, EventBridge, a private ECR
 repository, or customer-managed KMS key yet. Do not add a VPC, private endpoints,
@@ -560,12 +564,12 @@ unrelated resources. Confirm the account and region before every apply.
 
 ## IAM boundaries
 
-| Identity | Allowed access |
-| --- | --- |
-| Human operator | Submit, inspect, download, cancel; pass approved roles |
-| Provisioner | Manage only approved Cloudbox infrastructure |
-| Build role | Read image archive; write build logs |
-| Runtime role | Read approved inputs; write outputs and logs; use selected model access |
+| Identity       | Allowed access                                                          |
+| -------------- | ----------------------------------------------------------------------- |
+| Human operator | Submit, inspect, download, cancel; pass approved roles                  |
+| Provisioner    | Manage only approved Cloudbox infrastructure                            |
+| Build role     | Read image archive; write build logs                                    |
+| Runtime role   | Read approved inputs; write outputs and logs; use selected model access |
 
 The build and runtime roles use the Lambda service trust policy. AWS currently
 requires `sts:AssumeRole` and `sts:TagSession` in that policy.
@@ -985,14 +989,14 @@ Keep machine-readable stdout separate from diagnostics. CLI operation status
 and remote task outcome must remain distinct. Exact flags and exit codes are
 implementation details to document and test, not new services.
 
-| Command | Behavior |
-| --- | --- |
-| `submit` | Validate and save a new run; start its VM; return its unique ID without blocking other runs |
-| `list` | List past and current runs with IDs, times, recorded outcomes, and result references; support filtering and pagination |
-| `status` | Read the result and VM state; show task outcome and compute state separately |
-| `logs` | Follow the run's CloudWatch stream during execution or read saved events after termination |
-| `download` | Download saved results, including partial output marked incomplete after failure or timeout |
-| `cancel` | Request VM termination and check its state; do not overwrite a completed result |
+| Command    | Behavior                                                                                                               |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `submit`   | Validate and save a new run; start its VM; return its unique ID without blocking other runs                            |
+| `list`     | List past and current runs with IDs, times, recorded outcomes, and result references; support filtering and pagination |
+| `status`   | Read the result and VM state; show task outcome and compute state separately                                           |
+| `logs`     | Follow the run's CloudWatch stream during execution or read saved events after termination                             |
+| `download` | Download saved results, including partial output marked incomplete after failure or timeout                            |
+| `cancel`   | Request VM termination and check its state; do not overwrite a completed result                                        |
 
 Missing evidence remains an unknown outcome. A successful task with a running
 VM is incomplete cleanup, not a fully completed run.

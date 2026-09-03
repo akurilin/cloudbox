@@ -5,8 +5,12 @@ ARG NODE_VERSION=22.23.2
 ARG NODE_ARM64_SHA256=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8
 ARG PI_VERSION=0.84.4
 
+# Use the package versions supplied by the base image's Amazon Linux repository.
+# hadolint ignore=DL3041
 RUN dnf install -y python3.12 python3.12-pip tar xz gzip bash ca-certificates curl-minimal \
     && dnf clean all
+# Fail the build if either side of a checksum pipe fails.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl --fail --silent --show-error --location \
       "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.xz" \
       --output /tmp/node.tar.xz \
