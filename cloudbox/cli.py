@@ -4,9 +4,9 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import sys
 import time
-import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +22,7 @@ from .common import (
     MAX_RECORD_BYTES,
     MAX_TIMEOUT_SECONDS,
     MICROVM_SERVICE,
+    MIN_TIMEOUT_SECONDS,
     RUN_SCHEMA_VERSION,
     SCHEMA_VERSION,
     SDK_CONFIG,
@@ -42,9 +43,23 @@ from .common import (
 )
 from .environments import add_environment_argument, get_environment
 from .github import prepare_github_access, revoke_quietly, token_deadline
+from .output import render_log, render_result, terminal_text
+from .run_selection import (
+    MAX_LIST_PAGE_SIZE,
+    MIN_RUN_PREFIX_LENGTH,
+    RUN_ID_LENGTH,
+    list_runs,
+    read_cursor,
+    resolve_run_id,
+    validate_run_reference,
+)
 
+USAGE_EXIT = 2
+INTERRUPTED_EXIT = 130
+JSON_OPTION = "--json"
+HUMAN_OPTION = "--human"
+OPTION_SEPARATOR = "--"
 LIST_PAGE_SIZE = 20
-MAX_LIST_PAGE_SIZE = 100
 LOG_POLL_SECONDS = 2
 LOG_SETTLE_POLLS = 3
 LOG_MAX_PAGES_PER_POLL = 3
@@ -80,7 +95,6 @@ AGENT_EVENTS = {
     "auto_retry_start",
     "auto_retry_end",
 }
-ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*?(?:\x07|\x1b\\))")
 IDLE_SUSPEND_SECONDS = 28_800
 MAX_HOOK_PAYLOAD_BYTES = 4096
 AWS_TERMINATED = "TERMINATED"
@@ -96,9 +110,24 @@ REJECTED_LAUNCH_CODES = {
 }
 
 
+class UsageError(CloudboxError):
+    """Keep the command context so argument errors can include its usage."""
+
+    def __init__(self, message, parser):
+        super().__init__("invalid_arguments", message)
+        self.parser = parser
+
+
 class Parser(argparse.ArgumentParser):
+    def __init__(self, *args, help_command=None, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        kwargs.setdefault("formatter_class", argparse.RawDescriptionHelpFormatter)
+        super().__init__(*args, **kwargs)
+        self.help_command = help_command or f"{self.prog} --help"
+        self.set_defaults(_parser=self)
+
     def error(self, message):
-        raise CloudboxError("invalid_arguments", message)
+        raise UsageError(message, self)
 
 
 def run_id(value):
@@ -110,38 +139,184 @@ def run_id(value):
     return value
 
 
+def argument_run_id(value):
+    # Convert CLI input errors without changing validation of saved file records.
+    try:
+        return validate_run_reference(value)
+    except CloudboxError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def list_limit(value):
+    # Reject invalid limits before the CLI loads a deployment or calls AWS.
+    message = f"Use a limit from 1 to {MAX_LIST_PAGE_SIZE}."
+    try:
+        limit = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(message) from error
+    if not 1 <= limit <= MAX_LIST_PAGE_SIZE:
+        raise argparse.ArgumentTypeError(message)
+    return limit
+
+
 def build_parser():
-    parser = Parser(prog="cloudbox")
+    json_help = "Print full JSON results and errors. Overrides terminal output."
+    parser = Parser(
+        prog="cloudbox",
+        description=(
+            "Run a task in the cloud and inspect its results.\n"
+            "Select --env before the command. exec and wait print response text;\n"
+            "other commands use human text in a terminal and JSON when piped."
+        ),
+        epilog=(
+            "Examples:\n"
+            '  cloudbox --env test exec "What is 2 + 2?"\n'
+            '  cloudbox --env test submit "Summarize this project."\n'
+            "  cloudbox --env test list\n\n"
+            "Use cloudbox COMMAND --help for command options and examples."
+        ),
+    )
     add_environment_argument(parser)
-    commands = parser.add_subparsers(dest="command", required=True)
-    for name, help_text in (
-        ("submit", "Start one cloud run."),
+    parser.add_argument(JSON_OPTION, action="store_true", help=json_help)
+    parser.add_argument(
+        HUMAN_OPTION, action="store_true", help="Print human text, even when piped."
+    )
+    commands = parser.add_subparsers(
+        dest="command", required=True, title="commands", metavar="COMMAND"
+    )
+
+    def add_command(name, description, examples, note=""):
+        epilog = "Examples:\n" + "\n".join(f"  {line}" for line in examples)
+        if note:
+            epilog += f"\n\n{note}"
+        return commands.add_parser(
+            name,
+            prog=f"cloudbox --env ENV {name}",
+            help_command=f"cloudbox {name} --help",
+            help=description,
+            description=description,
+            epilog=epilog,
+        )
+
+    for name, description in (
+        ("submit", "Start a cloud run and return its run ID."),
         ("exec", "Start a cloud run, wait, and print its response."),
     ):
-        command = commands.add_parser(name, help=help_text)
-        command.add_argument("prompt", nargs="?")
-        command.add_argument("--spec", type=Path)
-        command.add_argument("--model")
-        command.add_argument("--timeout")
-    listing = commands.add_parser("list", help="List saved runs.")
-    listing.add_argument("--status", choices=sorted(TASK_STATUSES))
-    listing.add_argument("--limit", type=int, default=LIST_PAGE_SIZE)
-    listing.add_argument("--cursor")
-    for name in ("status", "logs", "download", "cancel", "wait", "links"):
-        command = commands.add_parser(name)
-        command.add_argument("run_id", type=run_id)
+        command = add_command(
+            name,
+            description,
+            (
+                f'cloudbox --env test {name} "What is 2 + 2?"',
+                f"cat prompt.txt | cloudbox --env test {name} -",
+                f"cloudbox --env test {name} --spec job.json --timeout 10m",
+            ),
+            "Supply a prompt or --spec. "
+            "Model and timeout defaults come from the deployment.",
+        )
+        command.add_argument(
+            "prompt",
+            nargs="?",
+            metavar="PROMPT",
+            help="Task text; use - to read stdin.",
+        )
+        command.add_argument(
+            "--spec",
+            type=Path,
+            metavar="FILE",
+            help="Read a JSON job file instead of a prompt.",
+        )
+        command.add_argument("--model", help="Override the deployment or job model.")
+        command.add_argument(
+            "--timeout",
+            help=(
+                "Override the time limit: 600, 600s, or 10m "
+                f"({MIN_TIMEOUT_SECONDS} to {MAX_TIMEOUT_SECONDS} seconds)."
+            ),
+        )
+    listing = add_command(
+        "list",
+        "List saved runs, newest first.",
+        (
+            "cloudbox --env test list",
+            "cloudbox --env test list --status failed --limit 10",
+            "cloudbox --env test list --cursor CURSOR",
+        ),
+        "Use the returned cursor with the same status filter for the next page.\n"
+        "Listing reads saved run timestamps across all pages.",
+    )
+    listing.add_argument(
+        "--status",
+        choices=sorted(TASK_STATUSES),
+        help="Show only runs with this status.",
+    )
+    listing.add_argument(
+        "--limit",
+        type=list_limit,
+        default=LIST_PAGE_SIZE,
+        help=f"Runs per page, 1 to {MAX_LIST_PAGE_SIZE} (default: %(default)s).",
+    )
+    listing.add_argument("--cursor", help="Continue from a previous page's cursor.")
+    for name, description, options in (
+        ("status", "Show a run's task status, VM state, and saved result.", ""),
+        ("logs", "Print a run's log events.", " --follow"),
+        (
+            "download",
+            "Save run records and output files locally.",
+            " --output ./run-files",
+        ),
+        ("cancel", "Stop a run's VM.", ""),
+        ("wait", "Wait for a run to finish and print its response.", ""),
+        ("links", "Create temporary download links for output files.", ""),
+    ):
+        command = add_command(
+            name,
+            description,
+            (f"cloudbox --env test {name} RUN_ID{options}",),
+            "Replace RUN_ID with the full UUID from submit or list, "
+            f"or a unique prefix of at least {MIN_RUN_PREFIX_LENGTH} characters.",
+        )
+        command.add_argument(
+            "run_id",
+            type=argument_run_id,
+            metavar="RUN_ID",
+            help="Full run UUID or unique prefix.",
+        )
         if name == "logs":
-            command.add_argument("--follow", action="store_true")
+            command.add_argument(
+                "--follow",
+                action="store_true",
+                help="Read new events until the run ends.",
+            )
         if name == "download":
-            command.add_argument("--output", "--directory", dest="directory", type=Path)
+            command.add_argument(
+                "--output",
+                "--directory",
+                dest="directory",
+                type=Path,
+                metavar="DIRECTORY",
+                help="New destination directory (default: downloads/ENV/RUN_ID).",
+            )
     for name, command in commands.choices.items():
         if name in {"exec", "wait"}:
-            command.add_argument("--debug-agent", action="store_true")
-            command.add_argument("--debug-supervisor", action="store_true")
+            command.add_argument(
+                "--debug-agent",
+                action="store_true",
+                help="Print agent events to stderr.",
+            )
+            command.add_argument(
+                "--debug-supervisor",
+                action="store_true",
+                help="Print supervisor events to stderr.",
+            )
+        # Keep a root --json flag when no command-level flag is supplied.
         command.add_argument(
-            "--json",
+            JSON_OPTION, action="store_true", default=argparse.SUPPRESS, help=json_help
+        )
+        command.add_argument(
+            HUMAN_OPTION,
             action="store_true",
-            help="Print JSON. Other commands use JSON by default.",
+            default=argparse.SUPPRESS,
+            help="Print human text, even when piped.",
         )
     return parser
 
@@ -152,8 +327,14 @@ def input_spec(arguments):
         raise CloudboxError("conflicting_input", "Use a prompt or --spec, not both.")
     values = {}
     if arguments.spec is not None:
-        with arguments.spec.open("rb") as source:
-            raw = source.read(MAX_RECORD_BYTES + 1)
+        try:
+            with arguments.spec.open("rb") as source:
+                raw = source.read(MAX_RECORD_BYTES + 1)
+        except OSError as error:
+            raise CloudboxError(
+                "invalid_spec",
+                f"Cannot read job file '{arguments.spec}'. Check the path and read access.",
+            ) from error
         if len(raw) > MAX_RECORD_BYTES:
             raise CloudboxError("invalid_spec", "The job file is too large.")
         try:
@@ -188,16 +369,6 @@ def input_spec(arguments):
         }
     )
     return values
-
-
-def terminal_text(value):
-    # Keep response layout but remove terminal commands from remote text.
-    value = ANSI_ESCAPE.sub("", value)
-    return "".join(
-        character
-        for character in value
-        if character in "\n\t" or unicodedata.category(character) not in {"Cc", "Cf"}
-    )
 
 
 def diagnostic(message):
@@ -669,35 +840,12 @@ class Runs:
             "wait_error": {"code": code, "message": message, **details},
         }
 
-    def list(self, arguments):
+    def list(self, arguments, *, human=False):
         if not 1 <= arguments.limit <= MAX_LIST_PAGE_SIZE:
             raise CloudboxError(
                 "invalid_limit", f"Use a limit from 1 to {MAX_LIST_PAGE_SIZE}."
             )
-        request = {
-            "Bucket": self.bucket,
-            "Prefix": "runs/",
-            "Delimiter": "/",
-            "MaxKeys": arguments.limit,
-        }
-        if arguments.cursor:
-            request["ContinuationToken"] = arguments.cursor
-        page = self.s3.list_objects_v2(**request)
-        runs = []
-        for item in page.get("CommonPrefixes", []):
-            identity = item["Prefix"].split("/")[1]
-            try:
-                run_id(identity)
-            except CloudboxError:
-                continue
-            summary = self.status(identity)
-            if arguments.status is None or summary["task_status"] == arguments.status:
-                runs.append(summary)
-        return {
-            "ok": True,
-            "runs": runs,
-            "next_cursor": page.get("NextContinuationToken"),
-        }
+        return list_runs(self, arguments, human=human)
 
     def cancel(self, identity):
         before = self.status(identity)
@@ -847,7 +995,7 @@ class Runs:
             ],
         }
 
-    def logs(self, identity, follow):
+    def logs(self, identity, follow, *, human=False):
         logs = self.session.client("logs", config=SDK_CONFIG)
         token, settled = None, 0
         while True:
@@ -866,14 +1014,17 @@ class Runs:
                 response = {"events": [], "nextForwardToken": token}
             next_token = response.get("nextForwardToken")
             for event in response.get("events", []):
-                emit(
-                    {
-                        "ok": True,
-                        "environment": self.environment.name,
-                        "run_id": identity,
-                        "event": event,
-                    }
-                )
+                if human:
+                    print(render_log(event), flush=True)
+                else:
+                    emit(
+                        {
+                            "ok": True,
+                            "environment": self.environment.name,
+                            "run_id": identity,
+                            "event": event,
+                        }
+                    )
             drained = next_token == token
             token = next_token
             if not follow and drained:
@@ -884,17 +1035,45 @@ class Runs:
                 if settled >= LOG_SETTLE_POLLS:
                     break
                 time.sleep(LOG_POLL_SECONDS)
-        emit(
-            {
-                "ok": True,
-                "environment": self.environment.name,
-                "run_id": identity,
-                "end_of_stream": True,
-            }
+        if not human:
+            emit(
+                {
+                    "ok": True,
+                    "environment": self.environment.name,
+                    "run_id": identity,
+                    "end_of_stream": True,
+                }
+            )
+
+
+def display_error(record, *, parser=None):
+    # Keep SDK request contents private; show only the safe error record.
+    error = record["error"]
+    message = error.get("message")
+    if not message:
+        operation = error.get("operation")
+        message = (
+            f"AWS {operation} failed ({error['code']})."
+            if operation
+            else f"Command failed ({error['code']})."
         )
+    if parser:
+        diagnostic(parser.format_usage().rstrip())
+    diagnostic(f"cloudbox: error: {message}")
+    if parser:
+        diagnostic(f"Run '{parser.help_command}' for help and examples.")
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    if not argv:
+        parser.print_help()
+        return 0
+    # Read the output flag even when parsing fails, but exclude literal operands.
+    option_end = argv.index(OPTION_SEPARATOR) if OPTION_SEPARATOR in argv else len(argv)
+    json_output = JSON_OPTION in argv[:option_end]
+    parse_state = argparse.Namespace()
     arguments, identity = None, None
 
     def announce_run(value):
@@ -904,15 +1083,36 @@ def main(argv=None):
             diagnostic(f"Run ID: {value}")
 
     try:
-        arguments = build_parser().parse_args(argv)
+        arguments = parser.parse_args(argv, namespace=parse_state)
+        json_output = arguments.json
+        if arguments.json and arguments.human:
+            arguments._parser.error("Use --human or --json, not both.")
+        # Keep pipes machine-readable except for the existing response commands.
+        human_output = not json_output and (arguments.human or sys.stdout.isatty())
         blocking = arguments.command in {"exec", "wait"}
-        supplied = (
-            input_spec(arguments) if arguments.command in {"submit", "exec"} else None
-        )
-        if arguments.command == "wait":
+        try:
+            if arguments.command == "list" and arguments.cursor is not None:
+                read_cursor(arguments.cursor, arguments.status)
+            supplied = (
+                input_spec(arguments)
+                if arguments.command in {"submit", "exec"}
+                else None
+            )
+        except CloudboxError as error:
+            record = error_record(error)
+            if json_output:
+                emit(record)
+            else:
+                display_error(record, parser=arguments._parser)
+            return USAGE_EXIT
+        if arguments.command == "wait" and len(arguments.run_id) == RUN_ID_LENGTH:
             announce_run(arguments.run_id)
         environment = get_environment(arguments.env)
         runs = Runs(load_deployment(environment), environment)
+        if hasattr(arguments, "run_id") and len(arguments.run_id) < RUN_ID_LENGTH:
+            arguments.run_id = resolve_run_id(runs.s3, runs.bucket, arguments.run_id)
+        if arguments.command == "wait":
+            announce_run(arguments.run_id)
         if arguments.command == "submit":
             result = runs.submit(supplied)
         elif blocking:
@@ -943,7 +1143,7 @@ def main(argv=None):
                 diagnostic(f"Run {result['task_status']}: {reason}")
             return 0 if result["ok"] else 1
         elif arguments.command == "list":
-            result = runs.list(arguments)
+            result = runs.list(arguments, human=human_output)
         elif arguments.command == "status":
             result = runs.status(arguments.run_id)
         elif arguments.command == "cancel":
@@ -953,10 +1153,42 @@ def main(argv=None):
         elif arguments.command == "links":
             result = runs.links(arguments.run_id)
         else:
-            runs.logs(arguments.run_id, arguments.follow)
+            runs.logs(arguments.run_id, arguments.follow, human=human_output)
             return 0
-        emit({"environment": environment.name, **result})
+        record = {"environment": environment.name, **result}
+        if human_output:
+            if arguments.command == "list" and result.get("next_cursor"):
+                # Preserve filters so the suggested command continues this list.
+                next_arguments = [
+                    "cloudbox",
+                    "--env",
+                    environment.name,
+                    "list",
+                    HUMAN_OPTION,
+                    "--limit",
+                    str(arguments.limit),
+                ]
+                if arguments.status:
+                    next_arguments.extend(("--status", arguments.status))
+                next_arguments.extend(("--cursor", result["next_cursor"]))
+                record["next_command"] = shlex.join(next_arguments)
+            print(render_result(arguments.command, record), flush=True)
+        else:
+            emit(record)
         return 0
+    except UsageError as error:
+        record = error_record(error)
+        if json_output:
+            emit(record)
+        else:
+            # Unknown trailing options come from the root parser after selection.
+            context = (
+                getattr(parse_state, "_parser", parser)
+                if error.parser is parser
+                else error.parser
+            )
+            display_error(record, parser=context)
+        return USAGE_EXIT
     except (
         CloudboxError,
         BotoCoreError,
@@ -966,31 +1198,26 @@ def main(argv=None):
         KeyError,
     ) as error:
         record = error_record(error)
-        if arguments and arguments.command in {"exec", "wait"}:
-            if record.get("run_id"):
-                announce_run(record["run_id"])
-            if identity:
-                record["run_id"] = identity
-            if arguments.json:
-                emit(record)
-            else:
-                diagnostic(record["error"].get("message", record["error"]["code"]))
-        else:
+        if record.get("run_id") and not json_output:
+            announce_run(record["run_id"])
+        if identity:
+            record["run_id"] = identity
+        if json_output:
             emit(record)
+        else:
+            display_error(record)
         return 1
     except KeyboardInterrupt:
         record = {"ok": False, "error": {"code": "interrupted"}}
         if identity:
             record["run_id"] = identity
-        if arguments and arguments.command in {"exec", "wait"}:
             diagnostic("Local command stopped. Check the run status.")
-            if identity:
-                diagnostic(f"Run ID: {identity}")
-            if arguments.json:
-                emit(record)
-        else:
+            diagnostic(f"Run ID: {identity}")
+        elif not json_output:
+            diagnostic("Local command stopped.")
+        if json_output:
             emit(record)
-        return 130
+        return INTERRUPTED_EXIT
 
 
 if __name__ == "__main__":

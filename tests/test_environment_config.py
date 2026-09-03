@@ -10,7 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from cloudbox import cli, environments
+from cloudbox import environments
 from cloudbox.common import CloudboxError
 from scripts import e2e_cloud, smoke_cloud
 
@@ -195,25 +195,28 @@ class EnvironmentConfigTests(unittest.TestCase):
         self.process.assert_not_called()
 
     def test_missing_test_input_returns_json_from_smoke(self):
-        # Run the CLI in-process; empty local state must stop before AWS access.
-        def local_cli(command, **kwargs):
-            self.assertEqual(command[1:3], ["-m", "cloudbox"])
-            output = io.StringIO()
-            with redirect_stdout(output):
-                code = cli.main(command[3:])
-            return subprocess.CompletedProcess(
-                command, code, stdout=output.getvalue(), stderr=""
-            )
-
+        # Empty local state must stop before any command or job starts.
         output = io.StringIO()
-        self.process.side_effect = local_cli
-        with redirect_stdout(output):
-            self.assertEqual(smoke_cloud.main(["--env", "test"]), 1)
+        with (
+            patch.object(
+                smoke_cloud,
+                "execute",
+                side_effect=AssertionError("Unexpected job execution"),
+            ) as execute,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                smoke_cloud.main(
+                    ["--env", "test", "--output-directory", str(self.root / "smoke")]
+                ),
+                1,
+            )
         result = json.loads(output.getvalue())
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "cli_failed")
-        self.assertEqual(result["cli_error"], "terraform_not_initialized")
-        self.process.assert_called_once()
+        self.assertEqual(result["stage"], "deployment")
+        self.assertEqual(result["error"]["code"], "terraform_not_initialized")
+        execute.assert_not_called()
+        self.process.assert_not_called()
 
 
 class LocalInputIgnoreTests(unittest.TestCase):

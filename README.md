@@ -276,6 +276,54 @@ are not deleted. This is not an account-wide erase command.
 
 ## Jobs
 
+Use `cloudbox` or `cloudbox --help` to list commands and examples. Each command
+has help; no environment or AWS login is needed to read it:
+
+```sh
+uv run cloudbox
+uv run cloudbox exec --help
+uv run cloudbox download --help
+```
+
+For job commands, put `--env test` or `--env prod` before the command.
+Replace `RUN_ID` with a full run UUID or a unique prefix of at least
+8 characters. Ambiguous prefixes fail before the command acts on a run.
+
+Errors use text on stderr. Invalid input includes usage and a command help hint.
+Exit codes are 0 for success or help, 2 for invalid input, 1 for other failures,
+and 130 for Ctrl-C. For scripts, add `--json` before or after the command to get
+JSON errors on stdout. Successful output from each command is described below.
+
+`list`, `status`, `logs`, `submit`, `cancel`, `download`, and `links` use human
+text in a terminal and JSON when piped or redirected. Use `--human` or `--json`
+before or after the command to select a format. Errors still use stderr unless
+`--json` is supplied. JSON fields and log event envelopes remain unchanged.
+
+```sh
+uv run cloudbox --env test list
+uv run cloudbox --env test list --human | less
+uv run cloudbox --env test list --json > runs.json
+uv run cloudbox --env test status RUN_ID
+```
+
+`list` shows short run IDs, local date/time, duration, task status, VM state,
+file count, and a short summary. IDs use at least 8 characters and extend when
+another saved run shares the prefix. JSON retains full UUIDs. The date/time
+uses `YYYY-MM-DD HH:MM`: run start, VM launch, then submission time as available.
+Duration uses the start and finish times; active runs show elapsed time with
+`+`. Missing timing shows `-`. Narrow terminals show labelled records.
+`status` adds full IDs, failure details, and file names. Use `wait` for the
+response, `download` for local files, and `links` for fresh download URLs.
+`logs` shows timestamped
+messages. Task status and VM state are separate: a stopped VM can have a failed
+task or no saved result.
+
+Runs are listed newest first across all storage pages. `--status` filters before
+`--limit` is applied. Continue with the returned cursor and the same status
+filter. Cursors from older CLI versions are no longer valid; start a new list.
+Each list request reads all saved run timestamps. Large histories need more
+storage reads; no new infrastructure is required.
+
 `exec` submits, waits for the saved result and VM termination, then prints the
 agent's final response. It returns nonzero for failed, blocked, timed-out,
 cancelled, or unknown outcomes. `wait` does the same for an existing run.
@@ -294,8 +342,9 @@ token deltas and incremental shell output are not included. Ctrl-C stops local
 waiting and leaves the cloud job running. Use `wait RUN_ID` to reconnect or
 `cancel RUN_ID` to stop it. A lost launch response must not trigger resubmission.
 
-The commands below return JSON. `submit` returns at launch. Their exit codes
-describe the CLI operation; inspect `task_status` and `compute_state` for the job.
+`submit` returns at launch. The commands below use human text in a terminal.
+Their exit codes describe the CLI operation; inspect task status and VM state
+for the job. Add `--json` for the full records.
 
 ```sh
 uv run cloudbox --env prod submit 'Calculate 12 * 13. Set finish.result to a JSON object with an integer answer field.'
