@@ -23,10 +23,11 @@ Each environment reuses these Terraform roots:
 - This directory: restricted provisioner; storage, logs, secret metadata, workers.
 - `modules/policy/`: shared names, permissions, and resource inventory contract.
 
-Each environment the user configures uses separate local backend paths and
+`test` and `prod` use separate local backend paths and
 `TF_DATA_DIR` directories under `.cloudbox/environments/<env>/`. Inputs live in
-`infra/environments/<env>.tfvars.json`, which each user creates from the
-placeholder examples; the real files are Git-ignored. Keep inputs and state
+`infra/environments/<env>.tfvars.json`. Copy
+`infra/environments/deployment.tfvars.example.json` and replace its placeholders.
+The real files are Git-ignored. Keep inputs and state
 backups private. The wrappers check account identity and reject state from
 another account or region. There is no shared state or deployment-output cache.
 

@@ -4,16 +4,12 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 
 from cloudbox.common import ROOT, CloudboxError
 
-# Environments are not built into Cloudbox. A user defines each one locally by
-# creating its Git-ignored input file; the repository ships only placeholders.
-ENVIRONMENT_NAME_PATTERN = re.compile(r"[a-z][a-z0-9-]{1,31}")
-INPUT_SUFFIX = ".tfvars.json"
+ENVIRONMENT_NAMES = ("test", "prod")
 DEFAULT_WORKSPACE = "default"
 LOCAL_BACKEND = "local"
 STATE_FILENAME = "terraform.tfstate"
@@ -28,12 +24,8 @@ class Environment:
     name: str
 
     def __post_init__(self):
-        if not ENVIRONMENT_NAME_PATTERN.fullmatch(self.name):
-            raise CloudboxError("invalid_environment",
-                                "Use 2-32 lowercase letters, digits, or hyphens; start with a letter.")
-        if not self.input_path.exists():
-            raise CloudboxError("environment_not_configured",
-                                f"Create {self.input_path} from the example file and fill in your own account, region, and profile.")
+        if self.name not in ENVIRONMENT_NAMES:
+            raise CloudboxError("invalid_environment", "Select test or prod.")
 
     @property
     def main_root(self):
@@ -49,7 +41,7 @@ class Environment:
 
     @property
     def input_path(self):
-        return self.main_root / "environments" / f"{self.name}{INPUT_SUFFIX}"
+        return self.main_root / "environments" / f"{self.name}.tfvars.json"
 
     @property
     def key_path(self):
@@ -171,13 +163,6 @@ def get_environment(name):
     return Environment(name)
 
 
-def configured_environments():
-    """List environments the user has defined locally, in name order."""
-    directory = ROOT / "infra" / "environments"
-    names = (path.name[:-len(INPUT_SUFFIX)] for path in directory.glob(f"*{INPUT_SUFFIX}"))
-    return sorted(name for name in names if ENVIRONMENT_NAME_PATTERN.fullmatch(name))
-
-
 def add_environment_argument(parser):
-    parser.add_argument("--env", required=True, metavar="ENV",
-                        help="Select an environment you configured locally in infra/environments/<env>.tfvars.json.")
+    parser.add_argument("--env", choices=ENVIRONMENT_NAMES, required=True,
+                        help="Select isolated configuration and state.")

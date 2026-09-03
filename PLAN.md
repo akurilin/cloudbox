@@ -3,12 +3,16 @@
 Status: multi-account support and lifecycle test implemented; live test not run.
 Last reviewed: 2026-09-03.
 
-On 2026-09-03 the user removed all hard-coded AWS accounts, profile names, and
-SSO session names from the repository and deleted the legacy environment.
-Environments are now defined only by user-created, Git-ignored
-`infra/environments/<env>.tfvars.json` files; the tracked examples carry
-placeholder values. Concrete identifiers in this historical record were
-removed at the same time; the record below describes them generically.
+On 2026-09-03 the user requested generic account settings and removal of the
+legacy environment. Commands keep the fixed `test` and `prod` names. Each uses
+an ignored `infra/environments/<env>.tfvars.json` file. One tracked example,
+`infra/environments/deployment.tfvars.example.json`, contains placeholders.
+Account checks remain. Old local inputs and state remain ignored; existing AWS
+resources remain. Concrete identifiers in this record were replaced with
+generic descriptions.
+
+Local validation: all 13 environment regression tests passed after first
+reproducing the defects. No AWS calls or cloud lifecycle test ran.
 
 The user approved implementation, Git initialization, and incremental commits.
 The approved bootstrap created six IAM items: the provisioner role, its policy
@@ -119,14 +123,14 @@ new deletion path has not been run. The current deployment is unchanged.
 Use `prod` and `test`; the user selected `prod`, not `persistent`.
 Approved implementation: one repository and shared Terraform roots, with separate
 environment inputs, local backend paths, and Terraform working data. Commands
-require `--env <name>` for an environment the user configured locally, except for
+require `--env test` or `--env prod`, except for
 the full test, which defaults to test and rejects other environments. The
 legacy environment — the old management-account deployment with its original
-state paths — was removed on 2026-09-03; environment names, accounts, and
-profiles are no longer hard-coded in the repository.
+state paths — was removed on 2026-09-03. Account IDs and profile names come from
+local inputs.
 
-Inputs: ignored `infra/environments/<env>.tfvars.json`, with checked-in
-placeholder examples that contain no real account IDs or profile names.
+Inputs: ignored `infra/environments/<env>.tfvars.json`, copied from the shared
+`infra/environments/deployment.tfvars.example.json` placeholder file.
 States and backend data: `.cloudbox/environments/<env>/{bootstrap,main}/`.
 Terraform executes in each stage's `source/` directory, separate from state.
 Keys default to `.env.<env>`.
@@ -138,9 +142,10 @@ or `--yes` is needed for the full test. Keep account, state, and ownership check
 this changes human approval, not IAM permissions or deletion scope.
 Reset existing Cloudbox test resources with the standard teardown, including
 permanent secret deletion. Require a clean check before setup and a test account
-distinct from every other locally configured environment. Run setup, submit
-the math job, validate its
-downloaded JSON and VM termination, check list/log operations, then tear down.
+distinct from the configured production account. Reject invalid production
+inputs. Allow absent production inputs only when production state is empty.
+Run setup, submit the math job, validate its downloaded JSON and VM termination,
+check list/log operations, then tear down.
 Try cleanup after setup or job failure. Permanently delete the test secret and
 require a final clean check. A failed job or failed cleanup fails the test.
 Keep local reports and downloads. Do not run other commands against test during

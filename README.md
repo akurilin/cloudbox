@@ -11,30 +11,33 @@ CLI -> MicroVM -> Pi -> OpenRouter
 
 ## Environments
 
-Cloudbox does not ship AWS accounts, profiles, or credentials. Each environment
-is defined only by files you create locally and that Git ignores: your accounts,
-your AWS SSO profiles, and your OpenRouter key. Commands require `--env` to name
-an environment you have configured, except the full test, which defaults to
-`test` and cannot use another environment.
+Commands require `--env test` or `--env prod`. Use `test` for disposable resources
+and `prod` for a persistent deployment. The full cloud test defaults to `test`
+and rejects other environments.
 
-`test` and `prod` are the documented conventions — a disposable deployment and
-a long-lived one — but any name of lowercase letters, digits, and hyphens works.
-An environment exists once `infra/environments/<env>.tfvars.json` exists. Each
-environment has separate bootstrap and main state under
-`.cloudbox/environments/<env>/`. Keep these local files out of Git and back them
-up. Never change the account or region of an existing state. The CLI reads
-selected Terraform outputs in memory. Generated working directories link to the
-shared Terraform source; they do not copy configuration or state from another
-environment.
+Set your account ID, region, and AWS profile in
+`infra/environments/<env>.tfvars.json`. These local files are Git-ignored.
+Each environment has separate bootstrap and main state under
+`.cloudbox/environments/<env>/`. Back up inputs and state. Never change the
+account or region of existing state. The wrappers check the selected account;
+the CLI reads Terraform outputs in memory.
+
+`--env legacy` is removed. Its old local files remain ignored. Existing AWS
+resources remain; Cloudbox no longer manages that deployment.
 
 ## Setup
 
 Requirements: Python 3.12+, uv, Terraform, AWS CLI, and SSO administrator access
-in your own accounts. For a new checkout, copy the selected
-`infra/environments/*.tfvars.example.json` to the corresponding `*.tfvars.json`
-path and replace the placeholder account ID, AWS profile, and other settings
-with your own. Keep the OpenRouter key in `.env.test` or `.env.prod` as
-`OPENROUTER_API_KEY=...`; these files are ignored.
+in your own accounts. Copy the shared example:
+
+```sh
+cp infra/environments/deployment.tfvars.example.json infra/environments/test.tfvars.json
+```
+
+Replace the placeholder account ID and AWS profile; check the other settings.
+Keep the OpenRouter key in `.env.test` as `OPENROUTER_API_KEY=...`.
+For `prod`, copy the example to `infra/environments/prod.tfvars.json` and use
+`.env.prod`. Both key files are Git-ignored.
 
 ```sh
 aws sso login --profile YOUR-PROFILE
@@ -66,8 +69,9 @@ reset test -> check clean -> setup -> math job -> validate -> teardown -> check 
 ```
 
 The test clears an existing Cloudbox test deployment before setup. It refuses
-unknown deletion targets and any other locally configured environment that
-shares the test account. It checks
+unknown deletion targets, invalid production inputs, and a production account
+that matches the test account. Production inputs can be absent only when
+production state is empty. It checks
 `(12345 * 6789) + 98765 == 83908970`, the downloaded JSON,
 run status, logs, listing, and VM termination. It tries teardown even if setup or
 the job fails. Cleanup failure fails the test. AWS and OpenRouter charges apply.

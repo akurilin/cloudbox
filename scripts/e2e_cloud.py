@@ -11,11 +11,12 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cloudbox.common import ROOT, CloudboxError, emit, error_record, operator_session, timestamp
-from cloudbox.environments import configured_environments, get_environment
-from cloudbox.resources import check_resources
+from cloudbox.environments import get_environment
+from cloudbox.resources import check_resources, state_remains
 from scripts import setup, smoke_cloud, teardown
 
 TEST_ENVIRONMENT = "test"
+PROD_ENVIRONMENT = "prod"
 IDENTITY_FIELDS = ("aws_account_id", "aws_region", "aws_profile", "project_name")
 REPORT_VERSION = 1
 INTERRUPTED_EXIT_CODE = 130
@@ -23,24 +24,24 @@ TEST_NAME = "cloud_lifecycle"
 
 
 def test_configuration(environment, expected=None):
-    # Refuse reused account IDs or changed targets before cloud changes. The test
-    # environment must not share an account with any environment the user
-    # configured locally, whatever they named it.
+    # Check account separation and unchanged targets before cloud changes.
     if environment.name != TEST_ENVIRONMENT:
         raise CloudboxError("test_only", "The lifecycle test accepts only --env test.")
     config = setup.read_config(environment)[0]["deployment"]
     if expected and any(config[field] != expected[field] for field in IDENTITY_FIELDS):
         raise CloudboxError("test_target_changed", "The test account or deployment settings changed. Stop and inspect them.")
-    for name in configured_environments():
-        if name == environment.name:
-            continue
+    prod = get_environment(PROD_ENVIRONMENT)
+    if not prod.input_path.exists():
+        # Missing inputs are safe only when no saved prod deployment remains.
         try:
-            other = json.loads(get_environment(name).input_path.read_bytes())["deployment"]
-        except (OSError, ValueError, KeyError, TypeError):
-            # An unreadable input file cannot identify a shared account.
-            continue
-        if isinstance(other, dict) and other.get("aws_account_id") == config["aws_account_id"]:
-            raise CloudboxError("test_account_shared", f"Test must use a different account from {name}.")
+            if any(state_remains(prod, root) for root in prod.roots):
+                raise CloudboxError("prod_config_missing", "Restore the prod input file before the lifecycle test.")
+        except (OSError, ValueError, AttributeError) as error:
+            raise CloudboxError("invalid_state", "Check the saved prod state before the lifecycle test.") from error
+        return config
+    other = setup.read_config(prod)[0]["deployment"]
+    if config["aws_account_id"] == other["aws_account_id"]:
+        raise CloudboxError("test_account_shared", "Test must use a different account from prod.")
     return config
 
 

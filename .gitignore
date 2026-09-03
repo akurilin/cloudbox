@@ -8,6 +8,7 @@
 *.tfstate.*
 *.tfplan
 .terraform/
+infra/cloudbox.auto.tfvars.json
 infra/environments/*.tfvars.json
 crash.log
 crash.*.log
