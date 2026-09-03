@@ -149,4 +149,3 @@ Downloads refuse to overwrite files. Saved partial output remains available.
 The prior cloud math test passed on 2026-09-02 against the original
 single-account deployment. The new multi-account lifecycle test has not yet
 been run against AWS.
-See [PLAN.md](PLAN.md) for decisions and verification records.

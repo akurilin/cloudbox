@@ -2,11 +2,10 @@
 
 ## Session start
 
-- Read `PLAN.md` for the original goal, decisions, and work status.
+- Code and tests define behavior; `README.md` covers usage and future work.
 - Inspect current files and preserve unrelated changes.
 - Distinguish planning, local implementation, and AWS deployment. AWS login is
   not deployment approval.
-- Update `PLAN.md` when decisions or completed work change.
 
 ## Repo skills
 
